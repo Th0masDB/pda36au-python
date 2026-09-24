@@ -1,26 +1,3 @@
-"""
-main.py
-
-Voorbeelden
------------
-Device-info:
-    python main.py info
-
-Een scan:
-    python main.py single
-    python main.py single --save scan.npz
-
-Continuous:
-    python main.py continuous
-    python main.py continuous --no-plot
-
-Raw ADC counts plotten in plaats van device units:
-    python main.py continuous --raw
-
-Als later blijkt dat de fysieke kanalen omgewisseld zijn:
-    python main.py continuous --detector-channel 1
-"""
-
 from __future__ import annotations
 
 import argparse
