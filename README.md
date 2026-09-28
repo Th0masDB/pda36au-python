@@ -696,3 +696,5 @@ Deze software is onafhankelijk ontwikkeld en is niet verbonden aan of goedgekeur
 Gebruik op eigen risico, vooral voor functies die instellingen wijzigen of persistent opslaan.
 
 Thorlabs en PDA36AU zijn handelsmerken van hun respectieve eigenaar.
+
+## Bij deze software is gebruikgemaakt van AI.
