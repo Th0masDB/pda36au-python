@@ -1161,7 +1161,7 @@ class PDA36AU:
 
     def _status_poller(
         self,
-        interval: float = 0.10,
+        interval: float = 0.05,
     ) -> None:
         """
         Periodic status traffic is intentionally kept running while

@@ -335,12 +335,8 @@ def create_qt():
     usable on a headless Raspberry Pi.
     """
     try:
-        from PyQt5 import (
-            QtCore,
-            QtWidgets,
-        )
-
-        import pyqtgraph as pg
+     import pyqtgraph as pg
+     from pyqtgraph.Qt import QtCore, QtWidgets
 
     except ImportError as exc:
         raise RuntimeError(
@@ -656,10 +652,12 @@ def run_continuous_gui(
     timer = QtCore.QTimer()
 
     state = {
-        "display_blocks": 0,
-        "first_block": True,
-        "closing": False,
-    }
+    "display_blocks": 0,
+    "first_block": True,
+    "closing": False,
+    "last_block_time": time.monotonic(),
+    "warned": False,
+}
 
     def update_plot():
         try:
@@ -677,7 +675,19 @@ def run_continuous_gui(
             return
 
         if block is None:
+            age = time.monotonic() - state["last_block_time"]
+
+            if age > 0.5 and not state["warned"]:
+                print(
+                    f"WAARSCHUWING: al {age:.2f} s "
+                    "geen nieuw ADC-block ontvangen"
+                )
+                state["warned"] = True
+
             return
+
+        state["last_block_time"] = time.monotonic()
+        state["warned"] = False
 
         state["display_blocks"] += 1
 
