@@ -4,8 +4,8 @@ Python software voor het uitvoeren en uitlezen van scans van een optische cavity
 
 Het doel van dit project is om uiteindelijk een complete cavity scan controller te ontwikkelen waarmee een cavity automatisch gescand kan worden en het bijbehorende detectorsignaal kan worden gemeten en geanalyseerd.
 
+> [!WARNING]
 > **Status:** work in progress  
-> Op dit moment ligt de focus voornamelijk op communicatie en data-acquisitie met de Thorlabs PDA36AU.
 
 ## Doel van het project
 
@@ -71,31 +71,31 @@ pip install pyusb numpy pyqtgraph
 Sluit de PDA36AU via USB aan en controleer of communicatie mogelijk is:
 
 ```bash
-python main.py info
+python pda-tool.py info
 ```
 
 ### Enkele acquisitie
 
 ```bash
-python main.py single
+python pda-tool.py single
 ```
 
 Met bijvoorbeeld 40 dB gain:
 
 ```bash
-python main.py single --gain 40
+python pda-tool.py single --gain 40
 ```
 
 Zonder live grafiek:
 
 ```bash
-python main.py single --no-plot
+python pda-tool.py single --no-plot
 ```
 
 ### Continue acquisitie
 
 ```bash
-python main.py continuous
+python pda-tool.py continuous
 ```
 
 Stop de acquisitie met:
@@ -131,10 +131,9 @@ De volgende stappen zijn onder andere:
 - [x] USB-communicatie met PDA36AU
 - [x] PDA36AU data-acquisitie
 - [x] Live detectorweergave
-- [ ] Scan waveform genereren
 - [ ] Scan hardware aansturen
-- [ ] Scan en detector synchroniseren
-- [ ] Live cavity scan weergeven
+- [ ] Scan en detector synchroniseren (checken hoe betrouwbaar dit kan)
+- [ ] Live cavity scan weergeven (misschien)
 - [ ] Resonanties automatisch detecteren
 - [ ] Meetdata analyseren
 - [ ] Meetdata en instellingen opslaan
