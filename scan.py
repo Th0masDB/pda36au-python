@@ -11,7 +11,7 @@ DELAY = 0.01
 def meet_gemiddelde(pda, aantal_blokken=5):
     waarden = []
 
-    pda.start_continuous(buffer_length=100)
+    pda.start_continuous()
 
     try:
         for _ in range(aantal_blokken):
@@ -36,5 +36,11 @@ def scan_cavity():
     for i in range(0,4096, STEP):
         set_dac(i)
         time.sleep(DELAY)
+        x += [meet_gemiddelde(pda)]
+    set_dac(0)
 
-meet_gemiddelde()
+x = []
+
+with PDA36AU() as pda:
+    print(pda.get_gain_db())
+    print(x)
