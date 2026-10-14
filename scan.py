@@ -1,7 +1,16 @@
-from smbus2 import SMBus, i2c_msg
-from pda36au import PDA36AU
 import numpy as np
 import time
+import sys
+import matplotlib.pyplot as plt
+
+SIMULATIE = "--simulatie" in sys.argv or "--sim" in sys.argv
+
+if SIMULATIE:
+    from simulation import SMBus, i2c_msg, PDA36AU
+else:
+    from smbus2 import SMBus, i2c_msg
+    from pda36au import PDA36AU
+
 
 ADDRESS = 0x60
 bus = SMBus(1)
@@ -33,14 +42,20 @@ def set_dac(value):
     bus.i2c_rdwr(msg)
 
 def scan_cavity():
+    x = []
     for i in range(0,4096, STEP):
         set_dac(i)
         time.sleep(DELAY)
-        x += [meet_gemiddelde(pda)]
+        x.append([i, meet_gemiddelde(pda)])
     set_dac(0)
 
-x = []
+    return np.array(x)
+
 
 with PDA36AU() as pda:
     print(pda.get_gain_db())
-    print(x)
+    x = scan_cavity()
+    plt.plot(x[:,0], x[:,1])
+    plt.show()
+    # print(x[:,0])
+    
