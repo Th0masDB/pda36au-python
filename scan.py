@@ -4,7 +4,11 @@ import sys
 import matplotlib.pyplot as plt
 
 SIMULATIE = "--simulatie" in sys.argv or "--sim" in sys.argv
+PDA_Connected = "--PDACon" in sys.argv
 
+if SIMULATIE and PDA_Connected:
+    from simulation import SMBus, i2c_msg
+    from pda36au import PDA36AU
 if SIMULATIE:
     from simulation import SMBus, i2c_msg, PDA36AU
 else:
@@ -14,21 +18,17 @@ else:
 
 ADDRESS = 0x60
 bus = SMBus(1)
-STEP= 2
-DELAY = 0.01
+STEP= 50
+DELAY = 0.001
+AANTAL_BLOKKEN = 1
 
 def meet_gemiddelde(pda, aantal_blokken=5):
     waarden = []
 
-    pda.start_continuous()
+    for _ in range(aantal_blokken):
+        block = pda.read_block()
+        waarden.extend(block.detector)
 
-    try:
-        for _ in range(aantal_blokken):
-            block = pda.read_block()
-            waarden.extend(block.detector)
-
-    finally:
-        pda.stop_continuous()
 
     return np.mean(waarden)
 
@@ -42,12 +42,26 @@ def set_dac(value):
     bus.i2c_rdwr(msg)
 
 def scan_cavity():
+    pda.start_continuous()
     x = []
-    for i in range(0,4096, STEP):
-        set_dac(i)
-        time.sleep(DELAY)
-        x.append([i, meet_gemiddelde(pda)])
-    set_dac(0)
+    try:
+        for i in range(0, 4096, STEP):
+
+            set_dac(i)
+
+            if DELAY > 0:
+                time.sleep(DELAY)
+
+            gemiddelde = meet_gemiddelde(
+                pda,
+                aantal_blokken=AANTAL_BLOKKEN
+            )
+
+            x.append([i, gemiddelde])
+
+    finally:
+        pda.stop_continuous()
+        set_dac(0)
 
     return np.array(x)
 
