@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
 import argparse
 import threading
 import time
@@ -35,6 +29,8 @@ else:
 
 ADDRESS = 0x60
 DAC_MAX = 4095
+LIVE_PLOT_INTERVAL = 1.0   # seconden tussen live grafiek-updates
+MAX_LIVE_POINTS = 400      # maximaal aantal punten dat tijdens de scan naar de browser gaat
 
 
 @dataclass
@@ -180,6 +176,11 @@ def build_page() -> None:
                     step=1,
                 ).classes('w-44')
 
+                live_plot_switch = ui.switch(
+                    'Live grafiek',
+                    value=False,
+                ).tooltip('Uit = snelste scan; de volledige grafiek verschijnt zodra de scan klaar is')
+
                 start_button = ui.button('Start scan', icon='play_arrow')
                 stop_button = ui.button('Stop', icon='stop')
                 stop_button.disable()
@@ -251,37 +252,104 @@ def build_page() -> None:
     start_button.on('click', start_scan)
     stop_button.on('click', stop_scan)
 
-    rendered_points = {'count': -1}
+    rendered_points = {'count': -1, 'running': False}
+    last_ui = {
+        'status': None,
+        'point_text': None,
+        'gain_text': None,
+        'progress': None,
+        'error': None,
+        'running': None,
+    }
 
-    def refresh_ui() -> None:
+    def get_snapshot(copy_points: bool = False):
         with state_lock:
-            points = list(state.points)
-            running = state.running
-            status = state.status
-            error = state.error
-            current = state.current_dac
-            total = state.total_points
-            gain = state.gain_db
+            return {
+                'points': list(state.points) if copy_points else None,
+                'point_count': len(state.points),
+                'running': state.running,
+                'status': state.status,
+                'error': state.error,
+                'current': state.current_dac,
+                'total': state.total_points,
+                'gain': state.gain_db,
+            }
 
-        if len(points) != rendered_points['count']:
-            chart.options['series'][0]['data'] = points
-            chart.update()
-            rendered_points['count'] = len(points)
+    def refresh_status() -> None:
+        snapshot = get_snapshot(copy_points=False)
 
-        status_label.set_text(f'Status: {status}')
-        point_label.set_text(f'Punten: {len(points)} / {total}')
-        gain_label.set_text('Gain: -' if gain is None else f'Gain: {gain:g} dB')
-        progress.value = min(1.0, current / max(1, total))
-        error_label.set_text(error)
+        status_text = f"Status: {snapshot['status']}"
+        point_text = f"Punten: {snapshot['point_count']} / {snapshot['total']}"
+        gain = snapshot['gain']
+        gain_text = 'Gain: -' if gain is None else f'Gain: {gain:g} dB'
+        progress_value = min(1.0, snapshot['current'] / max(1, snapshot['total']))
 
-        if running:
-            start_button.disable()
-            stop_button.enable()
+        # Alleen wijzigingen naar de browser sturen. Dit houdt websocket-verkeer klein.
+        if status_text != last_ui['status']:
+            status_label.set_text(status_text)
+            last_ui['status'] = status_text
+        if point_text != last_ui['point_text']:
+            point_label.set_text(point_text)
+            last_ui['point_text'] = point_text
+        if gain_text != last_ui['gain_text']:
+            gain_label.set_text(gain_text)
+            last_ui['gain_text'] = gain_text
+        if progress_value != last_ui['progress']:
+            progress.value = progress_value
+            last_ui['progress'] = progress_value
+        if snapshot['error'] != last_ui['error']:
+            error_label.set_text(snapshot['error'])
+            last_ui['error'] = snapshot['error']
+
+        if snapshot['running'] != last_ui['running']:
+            if snapshot['running']:
+                start_button.disable()
+                stop_button.enable()
+            else:
+                start_button.enable()
+                stop_button.disable()
+            last_ui['running'] = snapshot['running']
+
+    def refresh_chart() -> None:
+        snapshot = get_snapshot(copy_points=False)
+        count = snapshot['point_count']
+        running = snapshot['running']
+
+        # Met live plot uit sturen we tijdens de scan helemaal geen grafiekdata.
+        # Daardoor gedraagt de scan zich qua snelheid vrijwel als scan.py.
+        if running and not live_plot_switch.value:
+            rendered_points['running'] = True
+            return
+
+        # Geen nieuwe data en geen overgang van running -> klaar: niets doen.
+        scan_just_finished = rendered_points['running'] and not running
+        if count == rendered_points['count'] and not scan_just_finished:
+            rendered_points['running'] = running
+            return
+
+        snapshot = get_snapshot(copy_points=True)
+        points = snapshot['points']
+
+        if running and len(points) > MAX_LIVE_POINTS:
+            # Tijdens de scan hoeft de browser niet alle ~2000 punten te tekenen.
+            # We bewaren wel alles; alleen de live-weergave wordt uitgedund.
+            stride = max(1, len(points) // MAX_LIVE_POINTS)
+            display_points = points[::stride]
+            if display_points[-1] != points[-1]:
+                display_points.append(points[-1])
         else:
-            start_button.enable()
-            stop_button.disable()
+            # Na afloop altijd de volledige dataset tonen.
+            display_points = points
 
-    ui.timer(0.25, refresh_ui)
+        chart.options['series'][0]['data'] = display_points
+        chart.update()
+        rendered_points['count'] = len(points)
+        rendered_points['running'] = running
+
+    # Status mag vlot verversen; grafiekupdates zijn bewust veel trager.
+    ui.timer(0.5, refresh_status)
+    ui.timer(LIVE_PLOT_INTERVAL, refresh_chart)
+
 
 
 build_page()
