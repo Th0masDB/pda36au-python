@@ -18,12 +18,21 @@ def get_pi_model():
 
 def shutdown():
     """Vraag systemd om netjes af te sluiten, zonder interactief wachtwoord."""
+    _request_power_action('poweroff')
+
+
+def reboot():
+    """Vraag systemd om netjes te herstarten, zonder interactief wachtwoord."""
+    _request_power_action('reboot')
+
+
+def _request_power_action(action):
     if not get_pi_model():
-        raise RuntimeError('Afsluiten is alleen beschikbaar op een Raspberry Pi.')
+        raise RuntimeError('Systeembeheer is alleen beschikbaar op een Raspberry Pi.')
     result = subprocess.run(
-        ['systemctl', '--no-ask-password', 'poweroff'],
+        ['systemctl', '--no-ask-password', action],
         capture_output=True, text=True, timeout=10, check=False,
     )
     if result.returncode:
         detail = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(detail or 'Het systeem heeft het afsluitverzoek geweigerd.')
+        raise RuntimeError(detail or 'Het systeem heeft het verzoek geweigerd.')

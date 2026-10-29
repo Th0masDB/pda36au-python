@@ -211,16 +211,23 @@ vraagt de applicatie via `systemctl --no-ask-password poweroff` een normale
 systeemshutdown aan. Wacht tot de Pi volledig is afgesloten voordat je de
 voeding loskoppelt. Deze knop sluit ook bij gebruik van `--sim` de echte Pi af.
 
+Met **Raspberry Pi herstarten** kun je na bevestiging de Pi opnieuw opstarten.
+Ook hiervoor moeten de scan en live meting gestopt zijn. De applicatie gebruikt
+`systemctl --no-ask-password reboot`. De webinterface is tijdelijk onbereikbaar;
+met de onderstaande systemd-service start deze automatisch weer. Open de pagina
+opnieuw zodra de Pi is opgestart. Heb je de Polkit-regel eerder alleen voor
+afsluiten ingesteld, voeg dan ook de twee `reboot`-acties uit het voorbeeld toe.
+
 De gebruiker die de GUI uitvoert moet via het besturingssysteem toestemming
 hebben om af te sluiten. Als die toestemming ontbreekt, toont de pagina een
 fout; de applicatie vraagt geen sudo-wachtwoord. De beheerpagina is beschikbaar
 voor iedereen met toegang tot de webinterface; gebruik deze op een vertrouwd netwerk.
 
 
-#### Afsluitrechten voor de servicegebruiker
+#### Afsluit- en herstartrechten voor de servicegebruiker
 
 De GUI draait met deze service als `cavity`. Geef deze gebruiker via Polkit
-toestemming om zonder wachtwoord af te sluiten. Open op de Pi:
+toestemming om zonder wachtwoord af te sluiten en te herstarten. Open op de Pi:
 
 ```bash
 sudo nano /etc/polkit-1/rules.d/50-cavity-poweroff.rules
@@ -232,7 +239,9 @@ Plaats hierin:
 polkit.addRule(function(action, subject) {
     if (subject.user === "cavity" &&
         (action.id === "org.freedesktop.login1.power-off" ||
-         action.id === "org.freedesktop.login1.power-off-multiple-sessions")) {
+         action.id === "org.freedesktop.login1.power-off-multiple-sessions" ||
+         action.id === "org.freedesktop.login1.reboot" ||
+         action.id === "org.freedesktop.login1.reboot-multiple-sessions")) {
         return polkit.Result.YES;
     }
 });
@@ -242,10 +251,10 @@ Gebruik dezelfde gebruikersnaam als bij `User=` in de service. Bewaar in nano
 met **Ctrl+O**, druk **Enter** en sluit met **Ctrl+X**. Polkit leest de regel
 automatisch in; hiervoor hoef je de Pi of de service niet te herstarten.
 
-Deze regel geeft de gebruiker toestemming om af te sluiten, ook wanneer andere
+Deze regel geeft de gebruiker toestemming om af te sluiten en te herstarten, ook wanneer andere
 gebruikers ingelogd zijn. De applicatie hoeft hiervoor niet als root te draaien
 en de Python-code hoeft niet te worden aangepast. Iedereen met toegang tot de
-webinterface kan vervolgens via de bevestigingsknop de Pi afsluiten.
+webinterface kan vervolgens via de bevestigingsknoppen de Pi afsluiten of herstarten.
 
 ## PDA36AU testen
 
