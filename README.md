@@ -81,6 +81,17 @@ pip install pyqtgraph matplotlib
 ```
 
 Voor echte scans gebruikt de controller I²C-bus **1** en DAC-adres **0x60**.
+Deze gedeelde instellingen staan in `config.py`:
+
+```python
+APP_VERSION = "0.1.0"
+I2C_BUS = 1
+DAC_ADDRESS = 0x60
+```
+
+De webinterface en `scan.py` gebruiken dezelfde bus en hetzelfde DAC-adres.
+Herstart de applicatie nadat je de instellingen hebt gewijzigd.
+
 Zorg dat I²C beschikbaar is en dat je gebruiker toegang heeft tot de I²C-bus en de PDA via USB.
 
 ## Webinterface
@@ -296,6 +307,7 @@ with PDA36AU() as detector:
 
 | Bestand | Functie |
 | --- | --- |
+| `config.py` | Gedeelde appversie, I²C-bus en DAC-adres |
 | `gui/main.py` | NiceGUI-pagina's voor Home, Scan, Grafieken en Raspberry Pi-beheer |
 | `gui/pi_control.py` | Raspberry Pi-detectie en systeemshutdown |
 | `gui/scan_controller.py` | Scanlogica, live acquisitie en gedeelde meetstatus |

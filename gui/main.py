@@ -1,6 +1,7 @@
 from nicegui import ui, run
 import scan_controller
 import pi_control
+from config import APP_VERSION
 
 def menu():
     with ui.header().classes("items-center px-6 bg-white outline outline-black/5"):
@@ -92,6 +93,10 @@ def home():
     with ui.column().classes("p-6"):
         ui.label("Home").classes("text-3xl font-bold")
         ui.label("Welkom bij de demo!")
+
+    ui.label(f"Versie {APP_VERSION}").classes(
+        "fixed bottom-4 right-4 text-sm text-gray-500"
+    )
 
 
 @ui.page("/scan")

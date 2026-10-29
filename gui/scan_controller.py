@@ -13,6 +13,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
 
+from config import I2C_BUS, DAC_ADDRESS
 
 # ---------------------------------------------------------
 # Simulatie of echte hardware
@@ -35,13 +36,6 @@ else:
     # Echte DAC en echte PDA
     from smbus2 import SMBus, i2c_msg
     from pda36au import PDA36AU
-
-
-# ---------------------------------------------------------
-# Instellingen
-# ---------------------------------------------------------
-
-ADDRESS = 0x60
 
 
 # ---------------------------------------------------------
@@ -137,7 +131,7 @@ def set_dac(bus, value):
     byte2 = value & 0xFF
 
     msg = i2c_msg.write(
-        ADDRESS,
+        DAC_ADDRESS,
         [byte1, byte2],
     )
 
@@ -206,7 +200,7 @@ def scan_cavity(
 
     try:
         # I2C-bus openen
-        bus = SMBus(1)
+        bus = SMBus(I2C_BUS)
 
         # PDA openen
         with PDA36AU() as pda:

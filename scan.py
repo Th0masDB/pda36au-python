@@ -2,6 +2,7 @@ import numpy as np
 import time
 import sys
 import matplotlib.pyplot as plt
+from config import I2C_BUS, DAC_ADDRESS
 
 SIMULATIE = "--simulatie" in sys.argv or "--sim" in sys.argv
 PDA_Connected = "--PDACon" in sys.argv
@@ -16,8 +17,7 @@ else:
     from pda36au import PDA36AU
 
 
-ADDRESS = 0x60
-bus = SMBus(1)
+bus = SMBus(I2C_BUS)
 STEP= 50
 DELAY = 0.001
 AANTAL_BLOKKEN = 1
@@ -38,7 +38,7 @@ def set_dac(value):
     byte1 = (value >> 8) & 0x0F
     byte2 = value & 0xFF
 
-    msg = i2c_msg.write(ADDRESS, [byte1, byte2])
+    msg = i2c_msg.write(DAC_ADDRESS, [byte1, byte2])
     bus.i2c_rdwr(msg)
 
 def scan_cavity():
@@ -72,4 +72,3 @@ with PDA36AU() as pda:
     plt.plot(x[:,0], x[:,1])
     plt.show()
     # print(x[:,0])
-    
