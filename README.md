@@ -1,6 +1,6 @@
 # Cavity Scan Controller
 
-Python software voor het uitvoeren en uitlezen van scans van een optische cavity.
+Python-software voor het uitvoeren en uitlezen van scans van een optische cavity, met een NiceGUI-webinterface.
 
 Het doel van dit project is om uiteindelijk een complete cavity scan controller te ontwikkelen waarmee een cavity automatisch gescand kan worden en het bijbehorende detectorsignaal kan worden gemeten en geanalyseerd.
 
@@ -18,13 +18,20 @@ Een cavity scan bestaat uiteindelijk uit meerdere onderdelen, waaronder:
 - meetdata analyseren;
 - meetdata opslaan.
 
-De Python-driver voor de **Thorlabs PDA36AU** vormt momenteel een van de eerste onderdelen van dit project.
+Het project combineert een Python-driver voor de **Thorlabs PDA36AU** met DAC-aansturing via I²C en een webinterface voor scans en live detectorweergave.
 
 ## Huidige functionaliteit
 
-Op dit moment ondersteunt het project communicatie met de PDA36AU via USB.
+In de webinterface:
 
-Beschikbaar:
+- cavity scannen met instelbare DAC-stapgrootte, wachttijd en PDA-blokken per meetpunt;
+- scans handmatig stoppen;
+- het gemiddelde detectorsignaal per DAC-waarde weergeven;
+- de scangrafiek optioneel tijdens de scan bijwerken;
+- het nieuwste PDA-meetblok live bekijken, ook zonder scan;
+- volledig simuleren of een echte PDA combineren met een gesimuleerde DAC.
+
+Daarnaast biedt de PDA-driver met `pda-tool.py`:
 
 - PDA36AU automatisch detecteren;
 - apparaatinformatie uitlezen;
@@ -63,8 +70,70 @@ source .venv/bin/activate
 Installeer vervolgens de benodigde Python-packages:
 
 ```bash
-pip install pyusb numpy pyqtgraph
+pip install pyusb numpy nicegui smbus2
 ```
+
+Voor de losse grafieken van `pda-tool.py` en `scan.py`:
+
+```bash
+pip install pyqtgraph matplotlib
+```
+
+Voor echte scans gebruikt de controller I²C-bus **1** en DAC-adres **0x60**.
+Zorg dat I²C beschikbaar is en dat je gebruiker toegang heeft tot de I²C-bus en de PDA via USB.
+
+## Webinterface
+
+Voer de onderstaande opdrachten uit vanuit de projectmap, met de virtual environment actief.
+
+### Starten
+
+Zonder aangesloten hardware:
+
+```bash
+python gui/main.py --sim
+```
+
+Met een echte PDA en DAC:
+
+```bash
+python gui/main.py
+```
+
+Met een echte PDA en een gesimuleerde DAC:
+
+```bash
+python gui/main.py --sim --PDACon
+```
+
+`--simulatie` is een alternatief voor `--sim`. De optie `--PDACon` werkt in combinatie met simulatie.
+Open na het starten [http://localhost:8080](http://localhost:8080).
+
+### Cavity scannen
+
+Ga naar **Scan**, stel de meetparameters in en klik op **Start scan**:
+
+| Instelling | Betekenis | Standaard |
+| --- | --- | --- |
+| DAC stapgrootte | Stap tussen opeenvolgende DAC-waarden binnen 0–4095 | 50 |
+| Delay per stap (ms) | Wachttijd na het instellen van de DAC | 1 ms |
+| PDA blokken per punt | Aantal meetblokken waarvan het detectorsignaal wordt gemiddeld | 1 |
+| Live grafiek | Scangrafiek tijdens de meting bijwerken, maximaal twee keer per seconde | Uit |
+
+Met **Stop** vraag je de scan te stoppen. Na afloop verschijnt de volledige
+scangrafiek, ook als **Live grafiek** uit stond. De controller probeert de DAC
+na afloop, bij stoppen en bij een fout terug op nul te zetten.
+
+### Live PDA-signaal
+
+Open **Grafieken** en klik op **Start live meting**. De grafiek toont het
+nieuwste PDA-meetblok en ververst maximaal vijf keer per seconde. De assen gebruiken
+de eenheden van de PDA; zonder tijdkalibratie toont de x-as sample-nummers.
+Dit is het signaal binnen één meetblok, geen doorlopende geschiedenis.
+
+De meting blijft actief bij navigeren. Klik op **Stop live meting** voordat
+je een scan start. Tijdens scans toont deze pagina automatisch de PDA-blokken
+die de scan uitleest. De losse live meting wijzigt de DAC niet.
 
 ## PDA36AU testen
 
@@ -122,6 +191,17 @@ with PDA36AU() as detector:
     print(scan.channel_1_scaled)
 ```
 
+## Projectstructuur
+
+| Bestand | Functie |
+| --- | --- |
+| `gui/main.py` | NiceGUI-pagina's voor Home, Scan en Grafieken |
+| `gui/scan_controller.py` | Scanlogica, live acquisitie en gedeelde meetstatus |
+| `pda36au.py` | USB-driver voor de PDA36AU |
+| `simulation.py` | Gesimuleerde DAC en PDA met een cavity-resonantie en ruis |
+| `pda-tool.py` | Commandlinetool voor apparaatinformatie en acquisitie |
+| `scan.py` | Los scanscript met Matplotlib-weergave |
+
 ## Roadmap
 
 Het project bevindt zich nog in een vroege ontwikkelfase.
@@ -131,12 +211,12 @@ De volgende stappen zijn onder andere:
 - [x] USB-communicatie met PDA36AU
 - [x] PDA36AU data-acquisitie
 - [x] Live detectorweergave
-- [ ] Scan hardware aansturen
+- [x] DAC-aansturing via I²C implementeren
 - [ ] Scan en detector synchroniseren (checken hoe betrouwbaar dit kan)
-- [ ] Live cavity scan weergeven (misschien)
+- [x] Live cavity scan weergeven in de webinterface
 - [ ] Resonanties automatisch detecteren
 - [ ] Meetdata analyseren
-- [ ] Meetdata en instellingen opslaan
+- [ ] Meetdata en instellingen vanuit de webinterface opslaan
 
 De exacte implementatie en softwareopbouw kunnen tijdens de ontwikkeling nog veranderen.
 

@@ -56,6 +56,72 @@ error = ""
 
 lock = threading.Lock()
 stop_event = threading.Event()
+live_stop_event = threading.Event()
+live_running = False
+live_status = "Gereed"
+live_error = ""
+live_block = {"data": [], "x_unit": "sample", "y_unit": "", "sequence": 0}
+
+
+def publish_live_block(block):
+    """Bewaar alleen het nieuwste blok; geheugengebruik blijft begrensd."""
+    values = np.asarray(block.detector)
+    x = getattr(block, "x", np.arange(len(values)))
+    data = [[float(t), float(v) if np.isfinite(v) else None]
+            for t, v in zip(x, values)]
+    with lock:
+        live_block.update(data=data, x_unit=getattr(block, "x_unit", "sample"),
+                          y_unit=getattr(block, "y_unit", "gesimuleerd"),
+                          sequence=live_block["sequence"] + 1)
+
+
+def start_live():
+    """Start PDA-uitlezing zonder de DAC te openen of te wijzigen."""
+    global live_running, live_status, live_error
+    with lock:
+        if running or live_running:
+            return False
+        live_stop_event.clear()
+        live_running = True
+        live_status = "PDA verbinden..."
+        live_error = ""
+    threading.Thread(target=_read_live, daemon=True).start()
+    return True
+
+
+def _read_live():
+    global live_running, live_status, live_error
+    try:
+        with PDA36AU() as pda:
+            pda.start_continuous()
+            try:
+                with lock:
+                    live_status = "Live meten"
+                while not live_stop_event.is_set():
+                    publish_live_block(pda.read_block())
+                    live_stop_event.wait(0.05)
+            finally:
+                pda.stop_continuous()
+        with lock:
+            live_status = "Gestopt"
+    except Exception as exc:
+        with lock:
+            live_error = f"{type(exc).__name__}: {exc}"
+            live_status = "Fout tijdens live meting"
+    finally:
+        with lock:
+            live_running = False
+
+
+def stop_live():
+    live_stop_event.set()
+
+
+def get_live_data():
+    with lock:
+        return {**live_block, "running": live_running, "scanning": running,
+                "status": "Scannen (live PDA-data)" if running else live_status,
+                "error": live_error}
 
 
 # ---------------------------------------------------------
@@ -93,6 +159,7 @@ def meet_gemiddelde(pda, aantal_blokken):
             break
 
         block = pda.read_block()
+        publish_live_block(block)
 
         waarden.extend(
             block.detector
@@ -124,7 +191,7 @@ def scan_cavity(
     # Voorkom dat twee scans tegelijk starten
     with lock:
 
-        if running:
+        if running or live_running:
             return
 
         punten.clear()
