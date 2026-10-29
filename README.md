@@ -30,6 +30,7 @@ In de webinterface:
 - de scangrafiek optioneel tijdens de scan bijwerken;
 - het nieuwste PDA-meetblok live bekijken, ook zonder scan;
 - volledig simuleren of een echte PDA combineren met een gesimuleerde DAC.
+- op een Raspberry Pi: een beheerpagina om het systeem netjes af te sluiten.
 
 Daarnaast biedt de PDA-driver met `pda-tool.py`:
 
@@ -135,6 +136,106 @@ De meting blijft actief bij navigeren. Klik op **Stop live meting** voordat
 je een scan start. Tijdens scans toont deze pagina automatisch de PDA-blokken
 die de scan uitleest. De losse live meting wijzigt de DAC niet.
 
+### Automatisch starten als systemd-service
+
+Dit voorbeeld gebruikt gebruiker `cavity` en de projectmap
+`/home/cavity/pda36au-python`. Zorg dat de gebruiker, de projectmap en de virtual
+environment bestaan en dat `cavity` toegang heeft tot de USB- en I²C-hardware.
+Pas de gebruikersnaam en paden aan als jouw installatie anders is.
+
+Open op de Pi het servicebestand:
+
+```bash
+sudo nano /etc/systemd/system/pda36au.service
+```
+
+Plaats hierin:
+
+```ini
+[Unit]
+Description=PDA36AU Python application
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cavity
+WorkingDirectory=/home/cavity/pda36au-python
+ExecStart=/home/cavity/pda36au-python/.venv/bin/python /home/cavity/pda36au-python/gui/main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Activeer de service en laat deze automatisch starten bij het opstarten:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now pda36au.service
+```
+
+Als de service al draait, herstart je deze na wijzigingen aan de serviceconfiguratie
+of de Python-code met `sudo systemctl restart pda36au.service`.
+Controleer de status en logs met:
+
+```bash
+systemctl status pda36au.service
+journalctl -u pda36au.service -n 100 --no-pager
+```
+
+`Restart=always` herstart de applicatie bij uitvallen, maar verhindert geen
+normale systeemshutdown.
+
+### Raspberry Pi-beheer
+
+Wanneer de webinterface op een Raspberry Pi draait, verschijnt **Raspberry Pi**
+in het menu. De detectie gebruikt het hardwaremodel van de server, niet het
+apparaat waarop je de browser opent. Op andere computers wordt ook een direct
+bezoek aan `/raspberry-pi` teruggestuurd naar Home.
+
+Stop eerst alle metingen en kies **Raspberry Pi afsluiten**. Na bevestiging
+vraagt de applicatie via `systemctl --no-ask-password poweroff` een normale
+systeemshutdown aan. Wacht tot de Pi volledig is afgesloten voordat je de
+voeding loskoppelt. Deze knop sluit ook bij gebruik van `--sim` de echte Pi af.
+
+De gebruiker die de GUI uitvoert moet via het besturingssysteem toestemming
+hebben om af te sluiten. Als die toestemming ontbreekt, toont de pagina een
+fout; de applicatie vraagt geen sudo-wachtwoord. De beheerpagina is beschikbaar
+voor iedereen met toegang tot de webinterface; gebruik deze op een vertrouwd netwerk.
+
+
+#### Afsluitrechten voor de servicegebruiker
+
+De GUI draait met deze service als `cavity`. Geef deze gebruiker via Polkit
+toestemming om zonder wachtwoord af te sluiten. Open op de Pi:
+
+```bash
+sudo nano /etc/polkit-1/rules.d/50-cavity-poweroff.rules
+```
+
+Plaats hierin:
+
+```javascript
+polkit.addRule(function(action, subject) {
+    if (subject.user === "cavity" &&
+        (action.id === "org.freedesktop.login1.power-off" ||
+         action.id === "org.freedesktop.login1.power-off-multiple-sessions")) {
+        return polkit.Result.YES;
+    }
+});
+```
+
+Gebruik dezelfde gebruikersnaam als bij `User=` in de service. Bewaar in nano
+met **Ctrl+O**, druk **Enter** en sluit met **Ctrl+X**. Polkit leest de regel
+automatisch in; hiervoor hoef je de Pi of de service niet te herstarten.
+
+Deze regel geeft de gebruiker toestemming om af te sluiten, ook wanneer andere
+gebruikers ingelogd zijn. De applicatie hoeft hiervoor niet als root te draaien
+en de Python-code hoeft niet te worden aangepast. Iedereen met toegang tot de
+webinterface kan vervolgens via de bevestigingsknop de Pi afsluiten.
+
 ## PDA36AU testen
 
 Sluit de PDA36AU via USB aan en controleer of communicatie mogelijk is:
@@ -195,7 +296,8 @@ with PDA36AU() as detector:
 
 | Bestand | Functie |
 | --- | --- |
-| `gui/main.py` | NiceGUI-pagina's voor Home, Scan en Grafieken |
+| `gui/main.py` | NiceGUI-pagina's voor Home, Scan, Grafieken en Raspberry Pi-beheer |
+| `gui/pi_control.py` | Raspberry Pi-detectie en systeemshutdown |
 | `gui/scan_controller.py` | Scanlogica, live acquisitie en gedeelde meetstatus |
 | `pda36au.py` | USB-driver voor de PDA36AU |
 | `simulation.py` | Gesimuleerde DAC en PDA met een cavity-resonantie en ruis |

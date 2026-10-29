@@ -1,5 +1,6 @@
 from nicegui import ui, run
 import scan_controller
+import pi_control
 
 def menu():
     with ui.header().classes("items-center px-6 bg-white outline outline-black/5"):
@@ -24,6 +25,63 @@ def menu():
             icon="show_chart",
             on_click=lambda: ui.navigate.to("/grafieken")
         ).props("flat").classes("text-black")
+
+
+        if pi_control.get_pi_model():
+            ui.button(
+                "Raspberry Pi", icon="settings_power",
+                on_click=lambda: ui.navigate.to("/raspberry-pi"),
+            ).props("flat").classes("text-black")
+
+@ui.page("/raspberry-pi")
+def raspberry_pi():
+    model = pi_control.get_pi_model()
+    if not model:
+        ui.navigate.to("/")
+        return
+
+    ui.page_title('Raspberry Pi | Cavity controller')
+    menu()
+    with ui.column().classes("p-6 w-full gap-4"):
+        ui.label("Raspberry Pi-beheer").classes("text-3xl font-bold")
+        ui.label(model)
+        ui.label("Hiermee sluit je de Raspberry Pi af waarop deze webinterface draait.")
+        ui.label("Stop eerst de scan en de live meting. Wacht na afsluiten tot de Pi "
+                 "volledig uit is voordat je de voeding loskoppelt.")
+        status_label = ui.label("")
+
+        def request_shutdown():
+            # Houd de meetlock vast zodat geen andere browser tijdens het
+            # afsluitverzoek een nieuwe meting kan starten.
+            with scan_controller.lock:
+                if scan_controller.running or scan_controller.live_running:
+                    raise RuntimeError("Stop eerst de scan en de live PDA-meting.")
+                pi_control.shutdown()
+
+        async def confirm_shutdown():
+            dialog.close()
+            shutdown_button.disable()
+            status_label.set_text("Afsluiten aanvragen...")
+            try:
+                await run.io_bound(request_shutdown)
+            except Exception as exc:
+                status_label.set_text(f"Afsluiten mislukt: {exc}")
+                shutdown_button.enable()
+            else:
+                status_label.set_text("De Raspberry Pi sluit af. De webinterface wordt onbereikbaar.")
+
+        with ui.dialog() as dialog, ui.card():
+            ui.label("Raspberry Pi afsluiten?").classes("text-xl font-bold")
+            ui.label("De webinterface wordt afgesloten. Om opnieuw te starten moet je de Pi weer inschakelen.")
+            with ui.row():
+                ui.button("Annuleren", on_click=dialog.close).props("flat")
+                ui.button("Afsluiten", icon="power_settings_new",
+                          color="negative", on_click=confirm_shutdown)
+
+        shutdown_button = ui.button(
+            "Raspberry Pi afsluiten", icon="power_settings_new",
+            color="negative", on_click=dialog.open,
+        )
 
 
 @ui.page("/")
