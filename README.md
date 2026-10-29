@@ -11,9 +11,8 @@ Het doel van dit project is om uiteindelijk een complete cavity scan controller 
 
 Een cavity scan bestaat uiteindelijk uit meerdere onderdelen, waaronder:
 
-- een scansignaal genereren voor bijvoorbeeld een piezo;
+- een scansignaal genereren voor een piezo;
 - het detectorsignaal tijdens de scan uitlezen;
-- scan en detector synchroniseren;
 - cavity-resonanties weergeven;
 - meetdata analyseren;
 - meetdata opslaan.
@@ -43,7 +42,7 @@ Daarnaast biedt de PDA-driver met `pda-tool.py`:
 - ruwe ADC-data uitlezen;
 - meetdata opslaan.
 
-De communicatie gebeurt rechtstreeks via **PyUSB/libusb** en vereist geen officiële Thorlabs-software.
+De communicatie gebeurt rechtstreeks via **PyUSB/libusb** (en vereist dus geen officiële Thorlabs-software).
 
 ## Installatie
 
@@ -140,7 +139,7 @@ na afloop, bij stoppen en bij een fout terug op nul te zetten.
 
 Open **Grafieken** en klik op **Start live meting**. De grafiek toont het
 nieuwste PDA-meetblok en ververst maximaal vijf keer per seconde. De assen gebruiken
-de eenheden van de PDA; zonder tijdkalibratie toont de x-as sample-nummers.
+de eenheden van de PDA.
 Dit is het signaal binnen één meetblok, geen doorlopende geschiedenis.
 
 De meting blijft actief bij navigeren. Klik op **Stop live meting** voordat
@@ -335,7 +334,6 @@ De volgende stappen zijn onder andere:
 - [x] PDA36AU data-acquisitie
 - [x] Live detectorweergave
 - [x] DAC-aansturing via I²C implementeren
-- [ ] Scan en detector synchroniseren (checken hoe betrouwbaar dit kan)
 - [x] Live cavity scan weergeven in de webinterface
 - [ ] Resonanties automatisch detecteren
 - [ ] Meetdata analyseren
