@@ -153,10 +153,16 @@ def metingen():
         chart = ui.echart({
             "animation": False,
             "tooltip": {"trigger": "axis"},
-            "grid": {"left": 70, "right": 30, "top": 30, "bottom": 60},
+            "grid": {"left": 80, "right": 45, "top": 45, "bottom": 85,
+                     "containLabel": True},
+            "legend": {"data": ["PDA36AU", "Baseline"]},
             "xAxis": {
                 "type": "value", "name": "DAC waarde",
-                "nameLocation": "middle", "nameGap": 35, "min": 0, "max": 4095,
+                "nameLocation": "middle", "nameGap": 45, "min": 0, "max": 4095,
+                "splitNumber": 5, "minInterval": 1,
+                "axisLabel": {"fontSize": 13, "color": "#374151", "margin": 12,
+                              "hideOverlap": True},
+                "nameTextStyle": {"fontSize": 14, "color": "#374151"},
             },
             "yAxis": {
                 "type": "value", "name": "Detectorsignaal",
@@ -164,9 +170,29 @@ def metingen():
             },
             "series": [{
                 "name": "PDA36AU", "type": "line", "showSymbol": False, "data": [],
+            }, {
+                "name": "Baseline", "type": "line", "showSymbol": False,
+                "lineStyle": {"type": "dashed", "width": 2},
+                "itemStyle": {"color": "#d97706"}, "data": [],
             }],
         }).classes("w-full").style("height: 500px")
         grafiek_status = {"laatste_aantal": 0}
+
+        def update_scan_baseline(data):
+            background = data["background"]
+            value = background["value"]
+            # Zonder scan gebruiken we de eenheid van de achtergrondmeting.
+            unit = data["y_unit"]
+            baseline = ([[0, value], [4095, value]]
+                        if value is not None and unit in (None, background["y_unit"])
+                        else [])
+            changed = chart.options["series"][1]["data"] != baseline
+            chart.options["series"][1]["data"] = baseline
+            display_unit = unit if unit is not None else background["y_unit"]
+            axis_name = f"Detectorsignaal ({display_unit})" if display_unit else "Detectorsignaal"
+            changed = changed or chart.options["yAxis"]["name"] != axis_name
+            chart.options["yAxis"]["name"] = axis_name
+            return changed
 
         async def start_scan():
             huidige_status = scan_controller.get_status()
@@ -181,6 +207,7 @@ def metingen():
             aantal_blokken = max(1, int(blocks_input.value or 1))
 
             chart.options["series"][0]["data"] = []
+            update_scan_baseline(scan_controller.get_status())
             chart.update()
             grafiek_status["laatste_aantal"] = 0
             start_button.disable()
@@ -197,6 +224,7 @@ def metingen():
                 # Na afloop altijd de volledige grafiek tonen.
                 punten = scan_controller.get_points()
                 chart.options["series"][0]["data"] = punten
+                update_scan_baseline(scan_controller.get_status())
                 chart.update()
                 grafiek_status["laatste_aantal"] = len(punten)
                 start_button.enable()
@@ -216,6 +244,9 @@ def metingen():
             points_label.set_text(f'Meetpunten: {data["aantal_punten"]}')
             error_label.set_text(data["error"])
 
+            if update_scan_baseline(data):
+                chart.update()
+
             if not live_plot.value:
                 return
             if not data["running"]:
@@ -229,6 +260,7 @@ def metingen():
             chart.update()
             grafiek_status["laatste_aantal"] = len(punten)
 
+        update_gui()
         ui.timer(0.5, update_gui)
 
 
@@ -246,29 +278,78 @@ def grafieken():
                                      on_click=scan_controller.start_live)
             stop_button = ui.button("Stop live meting", icon="stop",
                                     on_click=scan_controller.stop_live)
+        with ui.expansion("Achtergrondmeting", icon="settings", value=False).classes("w-full"):
+            ui.label("Blokkeer de detector en klik op Meet achtergrond. "
+                     "De meting stopt automatisch als er geen live meting actief was. "
+                     "De baseline is het gemiddelde van de gekozen meetblokken.")
+            with ui.row().classes("gap-2 items-center"):
+                background_blocks = ui.number("Achtergrondblokken", value=10, min=1,
+                                              max=100, step=1).classes("w-44")
+
+                def measure_background():
+                    try:
+                        started = scan_controller.start_background(background_blocks.value or 10)
+                    except (ValueError, TypeError, OverflowError) as exc:
+                        ui.notify(str(exc), type="warning")
+                        return
+                    if not started:
+                        ui.notify("Wacht tot de huidige meting of het stoppen daarvan klaar is.",
+                                  type="warning")
+
+                background_button = ui.button("Meet achtergrond", icon="horizontal_rule",
+                                              on_click=measure_background)
+                clear_background_button = ui.button("Wis baseline", icon="clear",
+                                                    on_click=scan_controller.clear_background)
+            background_label = ui.label("Geen achtergrondmeting")
         status_label = ui.label("Gereed")
         error_label = ui.label("").classes("text-red-600")
         chart = ui.echart({
             "animation": False,
             "tooltip": {"trigger": "axis"},
-            "grid": {"left": 85, "right": 35, "top": 40, "bottom": 65},
-            "xAxis": {"type": "value", "name": "Sample", "nameLocation": "middle", "nameGap": 35},
+            "grid": {"left": 85, "right": 45, "top": 45, "bottom": 85,
+                     "containLabel": True},
+            "legend": {"data": ["PDA36AU", "Baseline"]},
+            "xAxis": {
+                "type": "value", "name": "Sample", "nameLocation": "middle", "nameGap": 45,
+                "splitNumber": 5,
+                "axisLabel": {"fontSize": 13, "color": "#374151", "margin": 12,
+                              "hideOverlap": True},
+                "nameTextStyle": {"fontSize": 14, "color": "#374151"},
+            },
             "yAxis": {"type": "value", "name": "Detectorsignaal", "scale": True},
-            "series": [{"name": "PDA36AU", "type": "line", "showSymbol": False, "data": []}],
+            "series": [
+                {"name": "PDA36AU", "type": "line", "showSymbol": False, "data": []},
+                {"name": "Baseline", "type": "line", "showSymbol": False,
+                 "lineStyle": {"type": "dashed", "width": 2},
+                 "itemStyle": {"color": "#d97706"}, "data": []},
+            ],
         }).classes("w-full").style("height: 500px")
         last_sequence = -1
+        last_background = None
 
         def update_live():
-            nonlocal last_sequence
+            nonlocal last_sequence, last_background
             data = scan_controller.get_live_data()
             status_label.set_text(data["status"])
             error_label.set_text(data["error"])
             start_button.set_enabled(not (data["running"] or data["scanning"]))
             stop_button.set_enabled(data["running"])
-            if data["sequence"] == last_sequence:
+            background = data["background"]
+            background_label.set_text(background["status"] + (
+                f' — baseline: {background["value"]:.6g} {background["y_unit"]}'
+                if background["value"] is not None else ""))
+            background_button.set_enabled(not data["scanning"] and not background["target"])
+            clear_background_button.set_enabled(background["value"] is not None or bool(background["target"]))
+            baseline = (background["value"], background["y_unit"])
+            if data["sequence"] == last_sequence and baseline == last_background:
                 return
             last_sequence = data["sequence"]
+            last_background = baseline
             chart.options["series"][0]["data"] = data["data"]
+            chart.options["series"][1]["data"] = (
+                [[data["data"][0][0], baseline[0]], [data["data"][-1][0], baseline[0]]]
+                if data["data"] and baseline[0] is not None and baseline[1] == data["y_unit"]
+                else [])
             chart.options["xAxis"]["name"] = f'Tijd / positie ({data["x_unit"]})'
             chart.options["yAxis"]["name"] = f'Detectorsignaal ({data["y_unit"]})'
             chart.update()

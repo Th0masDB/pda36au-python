@@ -43,6 +43,7 @@ else:
 # ---------------------------------------------------------
 
 punten = []
+scan_y_unit = None
 
 status = "Gereed"
 running = False
@@ -55,6 +56,38 @@ live_running = False
 live_status = "Gereed"
 live_error = ""
 live_block = {"data": [], "x_unit": "sample", "y_unit": "", "sequence": 0}
+background = {"value": None, "y_unit": "", "target": 0, "blocks": 0,
+              "sum": 0.0, "samples": 0, "status": "Geen achtergrondmeting"}
+
+
+def start_background(aantal_blokken=10):
+    """Meet de achtergrond zelfstandig of via de al actieve live uitlezing."""
+    global live_running, live_status, live_error
+    aantal_blokken = int(aantal_blokken)
+    if not 1 <= aantal_blokken <= 100:
+        raise ValueError("Kies 1 tot 100 achtergrondblokken.")
+    with lock:
+        if running or (live_running and live_stop_event.is_set()):
+            return False
+        if background["target"]:
+            return False
+        background.update(target=aantal_blokken, blocks=0, sum=0.0, samples=0,
+                          status="Achtergrond meten...")
+        standalone = not live_running
+        if standalone:
+            live_stop_event.clear()
+            live_running = True
+            live_status = "PDA verbinden voor achtergrondmeting..."
+            live_error = ""
+    if standalone:
+        threading.Thread(target=_read_live, kwargs={"background_only": True}, daemon=True).start()
+    return True
+
+
+def clear_background():
+    with lock:
+        background.update(value=None, y_unit="", target=0, blocks=0,
+                          sum=0.0, samples=0, status="Geen achtergrondmeting")
 
 
 def publish_live_block(block):
@@ -67,6 +100,25 @@ def publish_live_block(block):
         live_block.update(data=data, x_unit=getattr(block, "x_unit", "sample"),
                           y_unit=getattr(block, "y_unit", "gesimuleerd"),
                           sequence=live_block["sequence"] + 1)
+        if background["target"]:
+            unit = live_block["y_unit"]
+            if background["blocks"] and unit != background["measurement_unit"]:
+                background.update(target=0, status="Achtergrondmeting afgebroken: eenheid gewijzigd")
+                return
+            finite = values[np.isfinite(values)]
+            background["measurement_unit"] = unit
+            background["sum"] += float(np.sum(finite))
+            background["samples"] += int(finite.size)
+            background["blocks"] += 1
+            background["status"] = f'Achtergrond meten: {background["blocks"]}/{background["target"]} blokken'
+            if background["blocks"] >= background["target"]:
+                if background["samples"]:
+                    background["value"] = background["sum"] / background["samples"]
+                    background["y_unit"] = unit
+                    background["status"] = f'Achtergrond gemeten ({background["blocks"]} blokken)'
+                else:
+                    background["status"] = "Achtergrondmeting mislukt: geen geldige samples"
+                background["target"] = 0
 
 
 def start_live():
@@ -83,15 +135,20 @@ def start_live():
     return True
 
 
-def _read_live():
+def _read_live(background_only=False):
     global live_running, live_status, live_error
     try:
         with PDA36AU() as pda:
             pda.start_continuous()
             try:
                 with lock:
-                    live_status = "Live meten"
+                    live_status = "Achtergrond meten" if background_only else "Live meten"
                 while not live_stop_event.is_set():
+                    if background_only:
+                        with lock:
+                            if not background["target"]:
+                                live_stop_event.set()
+                                break
                     publish_live_block(pda.read_block())
                     live_stop_event.wait(0.05)
             finally:
@@ -105,6 +162,8 @@ def _read_live():
     finally:
         with lock:
             live_running = False
+            if background["target"]:
+                background.update(target=0, status="Achtergrondmeting afgebroken")
 
 
 def stop_live():
@@ -115,7 +174,9 @@ def get_live_data():
     with lock:
         return {**live_block, "running": live_running, "scanning": running,
                 "status": "Scannen (live PDA-data)" if running else live_status,
-                "error": live_error}
+                "error": live_error,
+                "background": {key: background[key] for key in
+                               ("value", "y_unit", "target", "status")}}
 
 
 # ---------------------------------------------------------
@@ -144,6 +205,7 @@ def set_dac(bus, value):
 
 def meet_gemiddelde(pda, aantal_blokken):
     """Lees PDA-blokken en bereken het gemiddelde."""
+    global scan_y_unit
 
     waarden = []
 
@@ -154,6 +216,8 @@ def meet_gemiddelde(pda, aantal_blokken):
 
         block = pda.read_block()
         publish_live_block(block)
+        with lock:
+            scan_y_unit = getattr(block, "y_unit", "gesimuleerd")
 
         waarden.extend(
             block.detector
@@ -181,6 +245,7 @@ def scan_cavity(
     global status
     global running
     global error
+    global scan_y_unit
 
     # Voorkom dat twee scans tegelijk starten
     with lock:
@@ -189,6 +254,7 @@ def scan_cavity(
             return
 
         punten.clear()
+        scan_y_unit = None
 
         status = "Scannen..."
         running = True
@@ -337,6 +403,8 @@ def get_status():
             "running": running,
             "error": error,
             "aantal_punten": len(punten),
+            "y_unit": scan_y_unit,
+            "background": {key: background[key] for key in ("value", "y_unit")},
         }
 
 
