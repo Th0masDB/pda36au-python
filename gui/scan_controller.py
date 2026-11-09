@@ -1,6 +1,8 @@
 import sys
 import time
 import threading
+import csv
+import io
 from pathlib import Path
 
 import numpy as np
@@ -419,6 +421,24 @@ def get_points():
     with lock:
 
         return list(punten)
+
+
+def export_scan_csv():
+    """Exporteer een consistente momentopname, ook bij een lopende scan."""
+    with lock:
+        rows = [list(point) for point in punten]
+        unit = scan_y_unit or ""
+        baseline = (background["value"]
+                    if background["y_unit"] == unit else None)
+    if not rows:
+        raise ValueError("Er zijn nog geen scanmeetpunten om te exporteren.")
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(["dac_waarde", "detectorsignaal", "eenheid", "baseline"])
+    for dac, signal in rows:
+        writer.writerow([dac, signal if np.isfinite(signal) else "", unit,
+                         baseline if baseline is not None else ""])
+    return output.getvalue().encode("utf-8-sig")
 
 
 def stop_scan():

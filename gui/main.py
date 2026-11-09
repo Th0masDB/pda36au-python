@@ -1,4 +1,5 @@
 from nicegui import ui, run
+from datetime import datetime
 import scan_controller
 import pi_control
 from config import APP_VERSION
@@ -146,6 +147,18 @@ def metingen():
             stop_button = ui.button("Stop", icon="stop")
             stop_button.disable()
 
+            def export_scan():
+                try:
+                    content = scan_controller.export_scan_csv()
+                except ValueError as exc:
+                    ui.notify(str(exc), type="warning")
+                    return
+                filename = f'cavity_scan_{datetime.now().astimezone():%Y%m%d_%H%M%S}.csv'
+                ui.download(content, filename, media_type="text/csv")
+
+            export_button = ui.button("Exporteer CSV", icon="download", on_click=export_scan)
+            export_button.disable()
+
         status_label = ui.label("Status: Gereed").classes("font-medium")
         points_label = ui.label("Meetpunten: 0")
         error_label = ui.label("").classes("text-red-600")
@@ -242,6 +255,7 @@ def metingen():
             data = scan_controller.get_status()
             status_label.set_text(f'Status: {data["status"]}')
             points_label.set_text(f'Meetpunten: {data["aantal_punten"]}')
+            export_button.set_enabled(data["aantal_punten"] > 0)
             error_label.set_text(data["error"])
 
             if update_scan_baseline(data):
