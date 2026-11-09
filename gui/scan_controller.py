@@ -58,7 +58,7 @@ live_running = False
 live_status = "Gereed"
 live_error = ""
 live_block = {"data": [], "x_unit": "sample", "y_unit": "", "sequence": 0}
-background = {"value": None, "y_unit": "", "target": 0, "blocks": 0,
+background = {"value": None, "sigma": None, "y_unit": "", "target": 0, "blocks": 0,
               "sum": 0.0, "samples": 0, "status": "Geen achtergrondmeting"}
 
 
@@ -73,7 +73,7 @@ def start_background(aantal_blokken=10):
             return False
         if background["target"]:
             return False
-        background.update(target=aantal_blokken, blocks=0, sum=0.0, samples=0,
+        background.update(target=aantal_blokken, blocks=0, sum=0.0, samples=0, mean=0.0, m2=0.0,
                           status="Achtergrond meten...")
         standalone = not live_running
         if standalone:
@@ -88,7 +88,7 @@ def start_background(aantal_blokken=10):
 
 def clear_background():
     with lock:
-        background.update(value=None, y_unit="", target=0, blocks=0,
+        background.update(value=None, sigma=None, y_unit="", target=0, blocks=0,
                           sum=0.0, samples=0, status="Geen achtergrondmeting")
 
 
@@ -108,6 +108,14 @@ def publish_live_block(block):
                 background.update(target=0, status="Achtergrondmeting afgebroken: eenheid gewijzigd")
                 return
             finite = values[np.isfinite(values)]
+            # Combineer blokstatistieken stabiel, zonder alle samples te bewaren.
+            if finite.size:
+                block_mean = float(np.mean(finite))
+                delta = block_mean - background["mean"]
+                count = background["samples"] + finite.size
+                background["m2"] += (float(np.sum((finite - block_mean) ** 2))
+                                     + delta ** 2 * background["samples"] * finite.size / count)
+                background["mean"] += delta * finite.size / count
             background["measurement_unit"] = unit
             background["sum"] += float(np.sum(finite))
             background["samples"] += int(finite.size)
@@ -116,6 +124,9 @@ def publish_live_block(block):
             if background["blocks"] >= background["target"]:
                 if background["samples"]:
                     background["value"] = background["sum"] / background["samples"]
+                    background["sigma"] = (float(np.sqrt(max(0.0, background["m2"])
+                                                          / (background["samples"] - 1)))
+                                           if background["samples"] > 1 else None)
                     background["y_unit"] = unit
                     background["status"] = f'Achtergrond gemeten ({background["blocks"]} blokken)'
                 else:
@@ -178,7 +189,7 @@ def get_live_data():
                 "status": "Scannen (live PDA-data)" if running else live_status,
                 "error": live_error,
                 "background": {key: background[key] for key in
-                               ("value", "y_unit", "target", "status")}}
+                               ("value", "sigma", "y_unit", "target", "status")}}
 
 
 # ---------------------------------------------------------
@@ -406,7 +417,7 @@ def get_status():
             "error": error,
             "aantal_punten": len(punten),
             "y_unit": scan_y_unit,
-            "background": {key: background[key] for key in ("value", "y_unit")},
+            "background": {key: background[key] for key in ("value", "sigma", "y_unit")},
         }
 
 
@@ -430,14 +441,19 @@ def export_scan_csv():
         unit = scan_y_unit or ""
         baseline = (background["value"]
                     if background["y_unit"] == unit else None)
+        sigma = background["sigma"] if baseline is not None else None
+        lower = baseline - 2 * sigma if sigma is not None else ""
+        upper = baseline + 2 * sigma if sigma is not None else ""
     if not rows:
         raise ValueError("Er zijn nog geen scanmeetpunten om te exporteren.")
     output = io.StringIO(newline="")
     writer = csv.writer(output)
-    writer.writerow(["dac_waarde", "detectorsignaal", "eenheid", "baseline"])
+    writer.writerow(["dac_waarde", "detectorsignaal", "eenheid", "baseline",
+                     "sigma", "baseline_min_2sigma", "baseline_plus_2sigma"])
     for dac, signal in rows:
         writer.writerow([dac, signal if np.isfinite(signal) else "", unit,
-                         baseline if baseline is not None else ""])
+                         baseline if baseline is not None else "",
+                         sigma if sigma is not None else "", lower, upper])
     return output.getvalue().encode("utf-8-sig")
 
 

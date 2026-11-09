@@ -4,6 +4,24 @@ import scan_controller
 import pi_control
 from config import APP_VERSION
 
+
+def sigma_series():
+    return [{"name": name, "type": "line", "showSymbol": False,
+             "lineStyle": {"type": "dotted", "width": 2},
+             "itemStyle": {"color": "#dc2626"}, "data": []}
+            for name in ("Baseline + 2σ", "Baseline − 2σ")]
+
+
+def update_sigma_lines(chart, background, baseline):
+    changed = False
+    for index, sign in ((2, 1), (3, -1)):
+        points = ([[x, y + sign * 2 * background["sigma"]] for x, y in baseline]
+                  if background["sigma"] is not None else [])
+        changed = changed or chart.options["series"][index]["data"] != points
+        chart.options["series"][index]["data"] = points
+    return changed
+
+
 def menu():
     with ui.header().classes("items-center px-6 bg-white outline outline-black/5"):
         ui.label("Cavity controller").classes("text-xl text-black font-bold")
@@ -168,7 +186,7 @@ def metingen():
             "tooltip": {"trigger": "axis"},
             "grid": {"left": 80, "right": 45, "top": 45, "bottom": 85,
                      "containLabel": True},
-            "legend": {"data": ["PDA36AU", "Baseline"]},
+            "legend": {"data": ["PDA36AU", "Baseline", "Baseline + 2σ", "Baseline − 2σ"]},
             "xAxis": {
                 "type": "value", "name": "DAC waarde",
                 "nameLocation": "middle", "nameGap": 45, "min": 0, "max": 4095,
@@ -187,7 +205,7 @@ def metingen():
                 "name": "Baseline", "type": "line", "showSymbol": False,
                 "lineStyle": {"type": "dashed", "width": 2},
                 "itemStyle": {"color": "#d97706"}, "data": [],
-            }],
+            }, *sigma_series()],
         }).classes("w-full").style("height: 500px")
         grafiek_status = {"laatste_aantal": 0}
 
@@ -201,6 +219,8 @@ def metingen():
                         else [])
             changed = chart.options["series"][1]["data"] != baseline
             chart.options["series"][1]["data"] = baseline
+            sigma_changed = update_sigma_lines(chart, background, baseline)
+            changed = changed or sigma_changed
             display_unit = unit if unit is not None else background["y_unit"]
             axis_name = f"Detectorsignaal ({display_unit})" if display_unit else "Detectorsignaal"
             changed = changed or chart.options["yAxis"]["name"] != axis_name
@@ -322,7 +342,7 @@ def grafieken():
             "tooltip": {"trigger": "axis"},
             "grid": {"left": 85, "right": 45, "top": 45, "bottom": 85,
                      "containLabel": True},
-            "legend": {"data": ["PDA36AU", "Baseline"]},
+            "legend": {"data": ["PDA36AU", "Baseline", "Baseline + 2σ", "Baseline − 2σ"]},
             "xAxis": {
                 "type": "value", "name": "Sample", "nameLocation": "middle", "nameGap": 45,
                 "splitNumber": 5,
@@ -336,6 +356,7 @@ def grafieken():
                 {"name": "Baseline", "type": "line", "showSymbol": False,
                  "lineStyle": {"type": "dashed", "width": 2},
                  "itemStyle": {"color": "#d97706"}, "data": []},
+                *sigma_series(),
             ],
         }).classes("w-full").style("height: 500px")
         last_sequence = -1
@@ -351,10 +372,12 @@ def grafieken():
             background = data["background"]
             background_label.set_text(background["status"] + (
                 f' — baseline: {background["value"]:.6g} {background["y_unit"]}'
-                if background["value"] is not None else ""))
+                if background["value"] is not None else "") + (
+                f' — σ: {background["sigma"]:.6g} {background["y_unit"]}'
+                if background["sigma"] is not None else ""))
             background_button.set_enabled(not data["scanning"] and not background["target"])
             clear_background_button.set_enabled(background["value"] is not None or bool(background["target"]))
-            baseline = (background["value"], background["y_unit"])
+            baseline = (background["value"], background["y_unit"], background["sigma"])
             if data["sequence"] == last_sequence and baseline == last_background:
                 return
             last_sequence = data["sequence"]
@@ -364,6 +387,7 @@ def grafieken():
                 [[data["data"][0][0], baseline[0]], [data["data"][-1][0], baseline[0]]]
                 if data["data"] and baseline[0] is not None and baseline[1] == data["y_unit"]
                 else [])
+            update_sigma_lines(chart, background, chart.options["series"][1]["data"])
             chart.options["xAxis"]["name"] = f'Tijd / positie ({data["x_unit"]})'
             chart.options["yAxis"]["name"] = f'Detectorsignaal ({data["y_unit"]})'
             chart.update()
