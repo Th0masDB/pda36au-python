@@ -177,6 +177,15 @@ def metingen():
             export_button = ui.button("Exporteer CSV", icon="download", on_click=export_scan)
             export_button.disable()
 
+        with ui.expansion("Achtergrondscan", icon="settings", value=False).classes("w-full"):
+            ui.label("Dek de laser af en meet de achtergrond met de scaninstellingen hierboven. "
+                     "De DAC doorloopt hetzelfde bereik. σ wordt berekend over de gemiddelde scanpunten.")
+            with ui.row().classes("gap-2"):
+                background_scan_button = ui.button("Meet achtergrondscan", icon="horizontal_rule")
+                clear_scan_background_button = ui.button(
+                    "Wis scanbaseline", icon="clear", on_click=scan_controller.clear_scan_background)
+            scan_background_label = ui.label("Geen achtergrondscan")
+
         status_label = ui.label("Status: Gereed").classes("font-medium")
         points_label = ui.label("Meetpunten: 0")
         error_label = ui.label("").classes("text-red-600")
@@ -215,7 +224,7 @@ def metingen():
             # Zonder scan gebruiken we de eenheid van de achtergrondmeting.
             unit = data["y_unit"]
             baseline = ([[0, value], [4095, value]]
-                        if value is not None and unit in (None, background["y_unit"])
+                        if value is not None and data["background_compatible"] and unit in (None, background["y_unit"])
                         else [])
             changed = chart.options["series"][1]["data"] != baseline
             chart.options["series"][1]["data"] = baseline
@@ -227,7 +236,7 @@ def metingen():
             chart.options["yAxis"]["name"] = axis_name
             return changed
 
-        async def start_scan():
+        async def start_scan(achtergrond=False):
             huidige_status = scan_controller.get_status()
             if huidige_status["running"]:
                 return
@@ -239,7 +248,8 @@ def metingen():
             delay = max(0.0, float(delay_input.value or 0) / 1000.0)
             aantal_blokken = max(1, int(blocks_input.value or 1))
 
-            chart.options["series"][0]["data"] = []
+            if not achtergrond:
+                chart.options["series"][0]["data"] = []
             update_scan_baseline(scan_controller.get_status())
             chart.update()
             grafiek_status["laatste_aantal"] = 0
@@ -251,7 +261,7 @@ def metingen():
             try:
                 # Hardware uitlezen in een thread houdt de GUI beschikbaar.
                 await run.io_bound(
-                    scan_controller.scan_cavity, step, delay, aantal_blokken,
+                    scan_controller.scan_cavity, step, delay, aantal_blokken, achtergrond,
                 )
             finally:
                 # Na afloop altijd de volledige grafiek tonen.
@@ -268,7 +278,8 @@ def metingen():
             status_label.set_text("Status: stoppen...")
             stop_button.disable()
 
-        start_button.on("click", start_scan)
+        start_button.on("click", lambda: start_scan())
+        background_scan_button.on("click", lambda: start_scan(achtergrond=True))
         stop_button.on("click", stop_scan)
 
         def update_gui():
@@ -276,6 +287,20 @@ def metingen():
             status_label.set_text(f'Status: {data["status"]}')
             points_label.set_text(f'Meetpunten: {data["aantal_punten"]}')
             export_button.set_enabled(data["aantal_punten"] > 0)
+            busy = data["running"] or scan_controller.get_live_data()["running"]
+            start_button.set_enabled(not busy)
+            background_scan_button.set_enabled(not busy)
+            stop_button.set_enabled(data["running"])
+            clear_scan_background_button.set_enabled(not busy and data["background"]["value"] is not None)
+            reference = data["background"]
+            text = reference["status"] + f' — punten: {reference["points"]}'
+            if reference["value"] is not None:
+                text += f' — baseline: {reference["value"]:.6g}, σ: {reference["sigma"]:.6g} {reference["y_unit"]}'
+                if reference["settings"] != (int(step_input.value or 50),
+                                              float(delay_input.value or 0) / 1000,
+                                              int(blocks_input.value or 1)):
+                    text += " — Instellingen gewijzigd: meet opnieuw de achtergrond vóór de volgende scan."
+            scan_background_label.set_text(text)
             error_label.set_text(data["error"])
 
             if update_scan_baseline(data):
@@ -317,12 +342,12 @@ def grafieken():
                      "De meting stopt automatisch als er geen live meting actief was. "
                      "De baseline is het gemiddelde van de gekozen meetblokken.")
             with ui.row().classes("gap-2 items-center"):
-                background_blocks = ui.number("Achtergrondblokken", value=10, min=1,
+                background_blocks = ui.number("Achtergrondblokken", value=1, min=1,
                                               max=100, step=1).classes("w-44")
 
                 def measure_background():
                     try:
-                        started = scan_controller.start_background(background_blocks.value or 10)
+                        started = scan_controller.start_background(background_blocks.value or 1)
                     except (ValueError, TypeError, OverflowError) as exc:
                         ui.notify(str(exc), type="warning")
                         return

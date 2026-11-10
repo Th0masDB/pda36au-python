@@ -46,6 +46,9 @@ else:
 
 punten = []
 scan_y_unit = None
+scan_settings = None
+scan_background = {"value": None, "sigma": None, "y_unit": "", "settings": None,
+                   "status": "Geen achtergrondscan", "points": 0}
 
 status = "Gereed"
 running = False
@@ -62,7 +65,7 @@ background = {"value": None, "sigma": None, "y_unit": "", "target": 0, "blocks":
               "sum": 0.0, "samples": 0, "status": "Geen achtergrondmeting"}
 
 
-def start_background(aantal_blokken=10):
+def start_background(aantal_blokken=1):
     """Meet de achtergrond zelfstandig of via de al actieve live uitlezing."""
     global live_running, live_status, live_error
     aantal_blokken = int(aantal_blokken)
@@ -216,7 +219,7 @@ def set_dac(bus, value):
 # PDA meten
 # ---------------------------------------------------------
 
-def meet_gemiddelde(pda, aantal_blokken):
+def meet_gemiddelde(pda, aantal_blokken, update_scan_unit=True):
     """Lees PDA-blokken en bereken het gemiddelde."""
     global scan_y_unit
 
@@ -230,7 +233,8 @@ def meet_gemiddelde(pda, aantal_blokken):
         block = pda.read_block()
         publish_live_block(block)
         with lock:
-            scan_y_unit = getattr(block, "y_unit", "gesimuleerd")
+            if update_scan_unit:
+                scan_y_unit = getattr(block, "y_unit", "gesimuleerd")
 
         waarden.extend(
             block.detector
@@ -252,13 +256,19 @@ def scan_cavity(
     step=50,
     delay=0.001,
     aantal_blokken=1,
+    achtergrond=False,
 ):
     """Voer één volledige cavity scan uit."""
 
     global status
     global running
     global error
-    global scan_y_unit
+    global scan_y_unit, scan_settings
+
+    settings = (int(step), float(delay), int(aantal_blokken))
+    if not 1 <= step <= 4095 or delay < 0 or not 1 <= aantal_blokken <= 100:
+        raise ValueError("Ongeldige scaninstellingen")
+    background_points = []
 
     # Voorkom dat twee scans tegelijk starten
     with lock:
@@ -266,10 +276,14 @@ def scan_cavity(
         if running or live_running:
             return
 
-        punten.clear()
-        scan_y_unit = None
+        if not achtergrond:
+            punten.clear()
+            scan_y_unit = None
+            scan_settings = settings
+        else:
+            scan_background.update(status="Achtergrond scannen...", points=0)
 
-        status = "Scannen..."
+        status = "Achtergrond scannen..." if achtergrond else "Scannen..."
         running = True
         error = ""
 
@@ -318,16 +332,17 @@ def scan_cavity(
                     # Detector meten
                     gemiddelde = meet_gemiddelde(
                         pda,
-                        aantal_blokken,
+                        aantal_blokken, update_scan_unit=not achtergrond,
                     )
 
                     # Meetpunt opslaan
                     with lock:
 
-                        punten.append([
-                            float(dac_value),
-                            gemiddelde,
-                        ])
+                        if achtergrond:
+                            background_points.append(gemiddelde)
+                            scan_background["points"] = len(background_points)
+                        else:
+                            punten.append([float(dac_value), gemiddelde])
 
             finally:
                 # PDA stoppen
@@ -345,9 +360,19 @@ def scan_cavity(
 
             with lock:
 
-                status = (
-                    f"Scan klaar - gain {gain} dB"
-                )
+                status = f"Scan klaar - gain {gain} dB"
+                if achtergrond:
+                    values = np.asarray(background_points)
+                    values = values[np.isfinite(values)]
+                    if values.size >= 2:
+                        scan_background.update(value=float(np.mean(values)),
+                                               sigma=float(np.std(values, ddof=1)),
+                                               y_unit=live_block["y_unit"], settings=settings,
+                                               status="Achtergrondscan klaar")
+                        status = "Achtergrondscan klaar"
+                    else:
+                        scan_background["status"] = "Achtergrondscan mislukt: minder dan twee geldige punten"
+                        status = scan_background["status"]
 
     except Exception as exc:
 
@@ -392,6 +417,8 @@ def scan_cavity(
                     pass
 
         with lock:
+            if achtergrond and (stop_event.is_set() or error):
+                scan_background["status"] = "Achtergrondscan afgebroken; vorige referentie behouden"
             running = False
 
         stop_event.clear()
@@ -400,6 +427,15 @@ def scan_cavity(
 # ---------------------------------------------------------
 # Functies voor de GUI
 # ---------------------------------------------------------
+
+def clear_scan_background():
+    with lock:
+        if running:
+            return False
+        scan_background.update(value=None, sigma=None, y_unit="", settings=None,
+                               status="Geen achtergrondscan", points=0)
+    return True
+
 
 def get_status():
     """
@@ -417,7 +453,9 @@ def get_status():
             "error": error,
             "aantal_punten": len(punten),
             "y_unit": scan_y_unit,
-            "background": {key: background[key] for key in ("value", "sigma", "y_unit")},
+            "background": dict(scan_background),
+            "settings": scan_settings,
+            "background_compatible": scan_settings is None or scan_settings == scan_background["settings"],
         }
 
 
@@ -439,9 +477,10 @@ def export_scan_csv():
     with lock:
         rows = [list(point) for point in punten]
         unit = scan_y_unit or ""
-        baseline = (background["value"]
-                    if background["y_unit"] == unit else None)
-        sigma = background["sigma"] if baseline is not None else None
+        baseline = (scan_background["value"]
+                    if scan_background["y_unit"] == unit
+                    and scan_background["settings"] == scan_settings else None)
+        sigma = scan_background["sigma"] if baseline is not None else None
         lower = baseline - 2 * sigma if sigma is not None else ""
         upper = baseline + 2 * sigma if sigma is not None else ""
     if not rows:
