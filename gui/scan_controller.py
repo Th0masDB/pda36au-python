@@ -3,6 +3,7 @@ import time
 import threading
 import csv
 import io
+from contextlib import suppress
 from pathlib import Path
 
 import numpy as np
@@ -156,19 +157,17 @@ def _read_live(background_only=False):
     try:
         with PDA36AU() as pda:
             pda.start_continuous()
-            try:
-                with lock:
-                    live_status = "Achtergrond meten" if background_only else "Live meten"
-                while not live_stop_event.is_set():
-                    if background_only:
-                        with lock:
-                            if not background["target"]:
-                                live_stop_event.set()
-                                break
-                    publish_live_block(pda.read_block())
-                    live_stop_event.wait(0.05)
-            finally:
-                pda.stop_continuous()
+            with lock:
+                live_status = "Achtergrond meten" if background_only else "Live meten"
+            while not live_stop_event.is_set():
+                if background_only:
+                    with lock:
+                        if not background["target"]:
+                            live_stop_event.set()
+                            break
+                publish_live_block(pda.read_block())
+                live_stop_event.wait(0.05)
+            pda.stop_continuous()
         with lock:
             live_status = "Gestopt"
     except Exception as exc:
@@ -344,15 +343,13 @@ def scan_cavity(
                         else:
                             punten.append([float(dac_value), gemiddelde])
 
-            finally:
-                # PDA stoppen
-                pda.stop_continuous()
+            except BaseException:
+                with suppress(Exception):
+                    set_dac(bus, 0)
+                raise
 
-                # DAC veilig terug naar nul
-                set_dac(
-                    bus,
-                    0,
-                )
+            pda.stop_continuous()
+            set_dac(bus, 0)
 
         # Alleen "klaar" melden wanneer
         # de scan niet handmatig gestopt is

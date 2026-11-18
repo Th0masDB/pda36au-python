@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import logging
 import math
 import queue
 import struct
 import threading
+from contextlib import suppress
 from dataclasses import dataclass
 
 import numpy as np
 import usb.core
 import usb.util
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -248,6 +253,7 @@ class PDA36AU:
         self._claimed = True
 
         self._command_lock = threading.Lock()
+        self._stream_lock = threading.RLock()
 
         self._stream_thread: threading.Thread | None = None
         self._status_thread: threading.Thread | None = None
@@ -281,7 +287,11 @@ class PDA36AU:
         exc_value,
         traceback,
     ) -> None:
-        self.close()
+        if exc_type is None:
+            self.close()
+        else:
+            with suppress(Exception):
+                self.close()
 
     @property
     def product_name(self) -> str:
@@ -304,27 +314,20 @@ class PDA36AU:
             return "<unknown>"
 
     def close(self) -> None:
-        if (
-            self._stream_thread is not None
-            and self._stream_thread.is_alive()
-        ):
-            try:
-                self.stop_continuous()
-            except Exception:
-                pass
+        with self._stream_lock:
+            if self._stream_thread is not None or self._status_thread is not None:
+                with suppress(Exception):
+                    self.stop_continuous()
 
-        if getattr(self, "_claimed", False):
-            try:
-                usb.util.release_interface(
-                    self.dev,
-                    self.INTERFACE,
-                )
-            except usb.core.USBError:
-                pass
+            if self._stream_workers_alive():
+                raise RuntimeError("PDA36AU-threads gebruiken de USB-verbinding nog")
 
-            self._claimed = False
+            if self._claimed:
+                with suppress(usb.core.USBError):
+                    usb.util.release_interface(self.dev, self.INTERFACE)
+                self._claimed = False
 
-        usb.util.dispose_resources(self.dev)
+            usb.util.dispose_resources(self.dev)
 
     # ------------------------------------------------------------
     # Low-level command interface
@@ -362,13 +365,11 @@ class PDA36AU:
                     f"{written}/{len(tx)} bytes"
                 )
 
-            rx = bytes(
-                self.dev.read(
-                    self.EP_RESPONSE_IN,
-                    response_size,
-                    timeout=timeout_ms,
-                )
-            )
+            # Give a delayed response a second read window, with one write per command.
+            try:
+                rx = bytes(self.dev.read(self.EP_RESPONSE_IN, response_size, timeout=timeout_ms))
+            except usb.core.USBTimeoutError:
+                rx = bytes(self.dev.read(self.EP_RESPONSE_IN, response_size, timeout=timeout_ms))
 
             if self.verbose:
                 print(
@@ -1102,7 +1103,7 @@ class PDA36AU:
                     self.dev.read(
                         self.EP_DATA_IN,
                         remaining,
-                        timeout=self.data_timeout_ms,
+                        timeout=self.data_timeout_ms or self.DEFAULT_DATA_TIMEOUT_MS,
                     )
                 )
 
@@ -1120,6 +1121,9 @@ class PDA36AU:
                             repr(exc),
                         )
 
+                break
+
+            if self._stream_stop.is_set():
                 break
 
             if not chunk:
@@ -1167,8 +1171,6 @@ class PDA36AU:
         Periodic status traffic is intentionally kept running while
         endpoint 0x83 is being read. This matches the sequence that
         proved stable on the real device.
-
-        100 ms is sufficient and reduces load on a Raspberry Pi.
         """
         previous = None
 
@@ -1207,20 +1209,24 @@ class PDA36AU:
                 interval
             )
 
-    def start_continuous(
-        self,
-        buffer_length: int = 2500,
-    ) -> None:
+    def _stream_workers_alive(self) -> bool:
+        return any(
+            thread is not None and thread.is_alive()
+            for thread in (self._stream_thread, self._status_thread)
+        )
 
-        if (
-            self._stream_thread is not None
-            and self._stream_thread.is_alive()
-        ):
-            raise RuntimeError(
-                "Continuous acquisitie draait al"
-            )
+    def start_continuous(self, buffer_length: int = 2500) -> None:
+        with self._stream_lock:
+            if not self._claimed:
+                raise RuntimeError("De PDA36AU-verbinding is gesloten")
+            if self._stream_workers_alive():
+                raise RuntimeError("Continuous acquisitie draait al")
 
+            self._start_continuous(buffer_length, refresh_scale=True)
+
+    def _start_continuous(self, buffer_length: int, *, refresh_scale: bool) -> None:
         self._stream_error = None
+        self._last_adc_status = None
 
         self._stream_stop.clear()
         self._stream_armed.clear()
@@ -1256,18 +1262,13 @@ class PDA36AU:
 
         # Cache calibration before the ADC stream starts.
         # No scale USB queries are then required from the GUI.
-        try:
-            self.get_scale(
-                refresh=True
-            )
-        except Exception as exc:
-            self._scale_cache = None
-
-            if self.verbose:
-                print(
-                    "PDA36AU scale query failed:",
-                    repr(exc),
-                )
+        if refresh_scale:
+            try:
+                self.get_scale(refresh=True)
+            except Exception as exc:
+                self._scale_cache = None
+                if self.verbose:
+                    print("PDA36AU scale query failed:", repr(exc))
 
         self._stream_thread = (
             threading.Thread(
@@ -1277,56 +1278,53 @@ class PDA36AU:
             )
         )
 
-        self._stream_thread.start()
+        try:
+            self._stream_thread.start()
+            if not self._stream_armed.wait(timeout=1.0):
+                raise RuntimeError("De PDA36AU-datareader kon niet starten")
 
-        if not self._stream_armed.wait(
-            timeout=1.0
-        ):
-            raise RuntimeError(
-                "Datareader kon niet worden armed"
-            )
+            # The reader is now already waiting on endpoint 0x83.
+            self._stream_started.set()
+            self.start_adc()
+            self._last_adc_status = self.get_adc_status()
 
-        # The reader is now already waiting on endpoint 0x83.
-        self._stream_started.set()
-
-        self.start_adc()
-
-        self._last_adc_status = (
-            self.get_adc_status()
-        )
-
-        self._status_thread = (
-            threading.Thread(
+            self._status_thread = threading.Thread(
                 target=self._status_poller,
                 name="PDA36AU-status-poller",
                 daemon=True,
             )
-        )
-
-        self._status_thread.start()
+            self._status_thread.start()
+        except BaseException:
+            with suppress(Exception):
+                self.stop_continuous()
+            raise
 
     def stop_continuous(self) -> None:
-        self._stream_stop.set()
+        with self._stream_lock:
+            if not self._claimed:
+                return
+            self._stream_stop.set()
 
-        if self._status_thread is not None:
-            self._status_thread.join(
-                timeout=1.0
-            )
+            try:
+                if self._status_thread is not None and self._status_thread.is_alive():
+                    # The status command can spend one interval writing and two reading.
+                    self._status_thread.join(timeout=1.0 + 3 * self.command_timeout_ms / 1000)
+                    if self._status_thread.is_alive():
+                        raise RuntimeError("De PDA36AU-statuspoller kon niet stoppen")
+                self.abort()
+            finally:
+                if self._stream_thread is not None and self._stream_thread.is_alive():
+                    read_timeout_ms = self.data_timeout_ms or self.DEFAULT_DATA_TIMEOUT_MS
+                    self._stream_thread.join(timeout=1.0 + read_timeout_ms / 1000)
 
-        try:
-            self.abort()
+                self._stream_started.clear()
+                self._stream_armed.clear()
+                if not self._stream_workers_alive():
+                    self._status_thread = None
+                    self._stream_thread = None
 
-        finally:
             if self._stream_thread is not None:
-                self._stream_thread.join(
-                    timeout=2.0
-                )
-
-            self._status_thread = None
-            self._stream_thread = None
-
-            self._stream_started.clear()
-            self._stream_armed.clear()
+                raise RuntimeError("De PDA36AU-datareader kon niet stoppen")
 
     def read_raw_block(
         self,
@@ -1359,19 +1357,45 @@ class PDA36AU:
 
             raise TimeoutError(
                 "Geen PDA36AU-datablok ontvangen "
-                "binnen timeout. "
+                f"binnen {timeout:g} s. "
                 f"Laatste ADC-status: {status}"
             ) from exc
 
     def read_block(
         self,
         timeout: float = 5.0,
+        *,
+        recover_on_timeout: bool = True,
     ) -> PDABlock:
-        return self.decode_block(
-            self.read_raw_block(
-                timeout=timeout
-            )
-        )
+        """Wait up to `timeout` seconds per read. Restart a stalled stream once by default."""
+        reader = self._stream_thread
+        try:
+            raw = self.read_raw_block(timeout=timeout)
+        except TimeoutError as exc:
+            if not recover_on_timeout or timeout <= 0:
+                raise
+
+            with self._stream_lock:
+                if reader is None or reader is not self._stream_thread or self._stream_stop.is_set():
+                    raise
+
+                buffer_length = self._buffer_length
+                assert buffer_length is not None
+                logger.warning("PDA36AU-acquisitie opnieuw starten na time-out. %s", exc)
+                try:
+                    self.stop_continuous()
+                    self._start_continuous(buffer_length, refresh_scale=False)
+                except (RuntimeError, usb.core.USBError) as restart_error:
+                    raise RuntimeError(f"{exc} PDA36AU-herstart mislukt: {restart_error}") from restart_error
+
+            try:
+                raw = self.read_raw_block(timeout=timeout)
+            except TimeoutError as retry_error:
+                raise TimeoutError(
+                    f"{retry_error}. De PDA36AU-acquisitie is eenmaal opnieuw gestart."
+                ) from retry_error
+
+        return self.decode_block(raw)
 
     def read_latest_block(
         self,
@@ -1433,9 +1457,11 @@ class PDA36AU:
         )
 
         try:
-            return self.read_block(
-                timeout=timeout
-            )
-
-        finally:
+            block = self.read_block(timeout=timeout)
+        except BaseException:
+            with suppress(Exception):
+                self.stop_continuous()
+            raise
+        else:
             self.stop_continuous()
+            return block

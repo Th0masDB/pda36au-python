@@ -1,6 +1,7 @@
 import numpy as np
 import time
 import sys
+from contextlib import suppress
 import matplotlib.pyplot as plt
 from config import I2C_BUS, DAC_ADDRESS
 
@@ -59,9 +60,13 @@ def scan_cavity():
 
             x.append([i, gemiddelde])
 
-    finally:
         pda.stop_continuous()
-        set_dac(0)
+    except BaseException:
+        with suppress(Exception):
+            set_dac(0)
+        raise
+
+    set_dac(0)
 
     return np.array(x)
 
