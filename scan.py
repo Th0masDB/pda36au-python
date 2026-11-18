@@ -24,14 +24,15 @@ DELAY = 0.001
 AANTAL_BLOKKEN = 1
 
 def meet_gemiddelde(pda, aantal_blokken=5):
-    waarden = []
+    total = 0.0
+    samples = 0
 
     for _ in range(aantal_blokken):
-        block = pda.read_block()
-        waarden.extend(block.detector)
+        values = np.asarray(pda.read_block().detector)
+        total += float(values.sum(dtype=np.float64))
+        samples += values.size
 
-
-    return np.mean(waarden)
+    return total / samples if samples else float("nan")
 
 def set_dac(value):
     value = max(0, min(4095, value))

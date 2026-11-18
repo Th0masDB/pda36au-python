@@ -240,7 +240,7 @@ def metingen():
             huidige_status = scan_controller.get_status()
             if huidige_status["running"]:
                 return
-            if scan_controller.get_live_data()["running"]:
+            if huidige_status["live_running"]:
                 ui.notify("Stop eerst de live PDA-meting op Grafieken.", type="warning")
                 return
 
@@ -287,7 +287,7 @@ def metingen():
             status_label.set_text(f'Status: {data["status"]}')
             points_label.set_text(f'Meetpunten: {data["aantal_punten"]}')
             export_button.set_enabled(data["aantal_punten"] > 0)
-            busy = data["running"] or scan_controller.get_live_data()["running"]
+            busy = data["running"] or data["live_running"]
             start_button.set_enabled(not busy)
             background_scan_button.set_enabled(not busy)
             stop_button.set_enabled(data["running"])
@@ -303,21 +303,15 @@ def metingen():
             scan_background_label.set_text(text)
             error_label.set_text(data["error"])
 
-            if update_scan_baseline(data):
+            chart_changed = update_scan_baseline(data)
+            if (live_plot.value and data["running"]
+                    and data["aantal_punten"] != grafiek_status["laatste_aantal"]):
+                punten = scan_controller.get_points()
+                chart.options["series"][0]["data"] = punten
+                grafiek_status["laatste_aantal"] = len(punten)
+                chart_changed = True
+            if chart_changed:
                 chart.update()
-
-            if not live_plot.value:
-                return
-            if not data["running"]:
-                return
-            if data["aantal_punten"] == grafiek_status["laatste_aantal"]:
-                return
-
-            # Meetpunten alleen ophalen wanneer de live grafiek verandert.
-            punten = scan_controller.get_points()
-            chart.options["series"][0]["data"] = punten
-            chart.update()
-            grafiek_status["laatste_aantal"] = len(punten)
 
         update_gui()
         ui.timer(0.5, update_gui)

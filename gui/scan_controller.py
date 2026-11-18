@@ -61,7 +61,7 @@ live_stop_event = threading.Event()
 live_running = False
 live_status = "Gereed"
 live_error = ""
-live_block = {"data": [], "x_unit": "sample", "y_unit": "", "sequence": 0}
+live_block = {"block": None, "data": [], "x_unit": "sample", "y_unit": "", "sequence": 0}
 background = {"value": None, "sigma": None, "y_unit": "", "target": 0, "blocks": 0,
               "sum": 0.0, "samples": 0, "status": "Geen achtergrondmeting"}
 
@@ -96,21 +96,22 @@ def clear_background():
                           sum=0.0, samples=0, status="Geen achtergrondmeting")
 
 
-def publish_live_block(block):
-    """Bewaar alleen het nieuwste blok; geheugengebruik blijft begrensd."""
-    values = np.asarray(block.detector)
-    x = getattr(block, "x", np.arange(len(values)))
-    data = [[float(t), float(v) if np.isfinite(v) else None]
-            for t, v in zip(x, values)]
+def publish_live_block(block, *, update_scan_unit=False):
+    """Bewaar het nieuwste meetblok voor de volgende grafiekupdate."""
+    global scan_y_unit
+
+    unit = getattr(block, "y_unit", "gesimuleerd")
     with lock:
-        live_block.update(data=data, x_unit=getattr(block, "x_unit", "sample"),
-                          y_unit=getattr(block, "y_unit", "gesimuleerd"),
+        live_block.update(block=block, data=None, x_unit=getattr(block, "x_unit", "sample"),
+                          y_unit=unit,
                           sequence=live_block["sequence"] + 1)
+        if update_scan_unit:
+            scan_y_unit = unit
         if background["target"]:
-            unit = live_block["y_unit"]
             if background["blocks"] and unit != background["measurement_unit"]:
                 background.update(target=0, status="Achtergrondmeting afgebroken: eenheid gewijzigd")
                 return
+            values = np.asarray(block.detector)
             finite = values[np.isfinite(values)]
             # Combineer blokstatistieken stabiel, zonder alle samples te bewaren.
             if finite.size:
@@ -185,13 +186,35 @@ def stop_live():
     live_stop_event.set()
 
 
+def _format_live_samples(block):
+    values = np.asarray(block.detector)
+    x = getattr(block, "x", None)
+    if x is None:
+        x = np.arange(len(values), dtype=float)
+
+    length = min(len(x), len(values))
+    values = values[:length]
+    samples = np.column_stack((x[:length], values)).astype(float, copy=False).tolist()
+    for index in np.flatnonzero(~np.isfinite(values)):
+        samples[index][1] = None
+    return samples
+
+
 def get_live_data():
     with lock:
-        return {**live_block, "running": live_running, "scanning": running,
-                "status": "Scannen (live PDA-data)" if running else live_status,
-                "error": live_error,
-                "background": {key: background[key] for key in
-                               ("value", "sigma", "y_unit", "target", "status")}}
+        snapshot = {**live_block, "running": live_running, "scanning": running,
+                    "status": "Scannen (live PDA-data)" if running else live_status,
+                    "error": live_error,
+                    "background": {key: background[key] for key in
+                                   ("value", "sigma", "y_unit", "target", "status")}}
+
+    block = snapshot.pop("block")
+    if snapshot["data"] is None:
+        snapshot["data"] = _format_live_samples(block)
+        with lock:
+            if live_block["sequence"] == snapshot["sequence"]:
+                live_block["data"] = snapshot["data"]
+    return snapshot
 
 
 # ---------------------------------------------------------
@@ -220,31 +243,20 @@ def set_dac(bus, value):
 
 def meet_gemiddelde(pda, aantal_blokken, update_scan_unit=True):
     """Lees PDA-blokken en bereken het gemiddelde."""
-    global scan_y_unit
-
-    waarden = []
+    total = 0.0
+    samples = 0
 
     for _ in range(aantal_blokken):
-
         if stop_event.is_set():
             break
 
         block = pda.read_block()
-        publish_live_block(block)
-        with lock:
-            if update_scan_unit:
-                scan_y_unit = getattr(block, "y_unit", "gesimuleerd")
+        publish_live_block(block, update_scan_unit=update_scan_unit)
+        values = np.asarray(block.detector)
+        total += float(values.sum(dtype=np.float64))
+        samples += values.size
 
-        waarden.extend(
-            block.detector
-        )
-
-    if not waarden:
-        return float("nan")
-
-    return float(
-        np.mean(waarden)
-    )
+    return total / samples if samples else float("nan")
 
 
 # ---------------------------------------------------------
@@ -447,6 +459,7 @@ def get_status():
         return {
             "status": status,
             "running": running,
+            "live_running": live_running,
             "error": error,
             "aantal_punten": len(punten),
             "y_unit": scan_y_unit,
