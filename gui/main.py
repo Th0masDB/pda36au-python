@@ -219,6 +219,7 @@ def metingen():
             blocks_input = ui.number(
                 label="PDA blokken per punt", value=1, min=1, max=100, step=1,
             ).classes("w-44")
+            blocks_input.set_enabled(not scan_controller.FAST_SCAN)
             live_plot = ui.switch("Live grafiek", value=False)
 
         with ui.row().classes("gap-2"):

@@ -135,6 +135,25 @@ Met **Stop** vraag je de scan te stoppen. Na afloop verschijnt de volledige
 scangrafiek, ook als **Live grafiek** uit stond. De controller probeert de DAC
 na afloop, bij stoppen en bij een fout terug op nul te zetten.
 
+#### Snelle scan
+
+```bash
+python gui/main.py --sim --PDACon --fast-scan
+```
+
+De DAC schrijft onafhankelijk van de continue PDA-stream. **Delay per stap**
+blijft de minimale wachttijd na een write. Met 0 ms test je de snelste
+simulatie. De grafiek en CSV tonen het gemiddelde van de samples per
+geschatte DAC-code van de opgaande sweep. De uitlijning gebruikt de USB-ontvangsttijd
+en de instelbare `FAST_SCAN_ADC_OFFSET_MS`. De status geeft de gemeten duur van
+de opgaande sweep en het aantal gemiste detectorblokken.
+
+Op de Pi activeert `--fast-scan` deze modus nadat `FAST_SCAN_LIMITS` in
+`config.py` is ingevuld met de goedgekeurde maximale DAC-code, maximale stap
+en minimale wachttijden voor heen en terug in ms. Bepaal die waarden op basis
+van de gemeten DAC-voeding en de belaste versterker en piezo. Start met een
+actieve DAC op code nul. De terugrit gebruikt dezelfde beperkte stappen.
+
 ### Live PDA-signaal
 
 Open **Grafieken** en klik op **Start live meting**. De grafiek toont het
