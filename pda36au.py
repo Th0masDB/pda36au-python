@@ -12,6 +12,8 @@ import numpy as np
 import usb.core
 import usb.util
 
+from pda_stream import PDAStream
+
 
 logger = logging.getLogger(__name__)
 
@@ -140,8 +142,10 @@ class PDA36AU:
     EP_COMMAND_OUT = 0x02
     EP_RESPONSE_IN = 0x82
     EP_DATA_IN = 0x83
+    DATA_PACKET_BYTES = 512
 
     ADC_MIDSCALE = 32768
+    TRIGGER_SLOPE_NONE = 2
 
     DEFAULT_COMMAND_TIMEOUT_MS = 1000
     DEFAULT_DATA_TIMEOUT_MS = 1000
@@ -219,6 +223,8 @@ class PDA36AU:
         verbose: bool = False,
         detector_channel: int = 0,
         queue_size: int = 32,
+        *,
+        detach_kernel_driver: bool = True,
     ):
         if detector_channel not in (0, 1):
             raise ValueError("detector_channel moet 0 of 1 zijn")
@@ -240,15 +246,18 @@ class PDA36AU:
             )
 
         try:
-            if self.dev.is_kernel_driver_active(self.INTERFACE):
-                self.dev.detach_kernel_driver(self.INTERFACE)
-        except (NotImplementedError, usb.core.USBError):
-            pass
-
-        usb.util.claim_interface(
-            self.dev,
-            self.INTERFACE,
-        )
+            try:
+                if self.dev.is_kernel_driver_active(self.INTERFACE):
+                    if not detach_kernel_driver:
+                        raise RuntimeError("A kernel driver owns the PDA36AU interface")
+                    self.dev.detach_kernel_driver(self.INTERFACE)
+            except (NotImplementedError, usb.core.USBError):
+                pass
+            usb.util.claim_interface(self.dev, self.INTERFACE)
+        except Exception:
+            with suppress(usb.core.USBError):
+                usb.util.dispose_resources(self.dev)
+            raise
 
         self._claimed = True
 
@@ -257,6 +266,7 @@ class PDA36AU:
 
         self._stream_thread: threading.Thread | None = None
         self._status_thread: threading.Thread | None = None
+        self._frame_stream: PDAStream | None = None
 
         self._stream_stop = threading.Event()
         self._stream_armed = threading.Event()
@@ -315,19 +325,24 @@ class PDA36AU:
 
     def close(self) -> None:
         with self._stream_lock:
-            if self._stream_thread is not None or self._status_thread is not None:
-                with suppress(Exception):
-                    self.stop_continuous()
+            session = self._frame_stream
+            try:
+                if session is not None:
+                    session.stop()
+                if self._stream_thread is not None or self._status_thread is not None:
+                    with suppress(Exception):
+                        self.stop_continuous()
+            finally:
+                if self._stream_workers_alive() or (session is not None and session.active):
+                    raise RuntimeError("PDA36AU-threads gebruiken de USB-verbinding nog")
 
-            if self._stream_workers_alive():
-                raise RuntimeError("PDA36AU-threads gebruiken de USB-verbinding nog")
+                self._frame_stream = None
+                if self._claimed:
+                    with suppress(usb.core.USBError):
+                        usb.util.release_interface(self.dev, self.INTERFACE)
+                    self._claimed = False
 
-            if self._claimed:
-                with suppress(usb.core.USBError):
-                    usb.util.release_interface(self.dev, self.INTERFACE)
-                self._claimed = False
-
-            usb.util.dispose_resources(self.dev)
+                usb.util.dispose_resources(self.dev)
 
     # ------------------------------------------------------------
     # Low-level command interface
@@ -1215,13 +1230,49 @@ class PDA36AU:
             for thread in (self._stream_thread, self._status_thread)
         )
 
+    def start_streaming(
+        self,
+        buffer_length: int = 2500,
+        *,
+        free_run: bool = False,
+        queue_size: int = 32,
+        status_interval_s: float | None = None,
+        transfer_bytes: int | None = None,
+    ) -> PDAStream:
+        """Start loss-reporting raw acquisition. Use the returned stream as a context manager."""
+        with self._stream_lock:
+            if not self._claimed:
+                raise RuntimeError("The PDA36AU connection is closed")
+            if self._stream_thread is not None or self._status_thread is not None or (
+                self._frame_stream is not None and self._frame_stream.active
+            ):
+                raise RuntimeError("PDA36AU acquisition already active")
+            session = PDAStream(
+                self, buffer_length, queue_size, free_run, status_interval_s, transfer_bytes
+            )
+            self._frame_stream = session
+            try:
+                session._start()
+            except BaseException:
+                try:
+                    session.stop()
+                except Exception as cleanup:
+                    logger.error("PDA36AU stream cleanup after startup failure: %s", cleanup)
+                if not session.active:
+                    self._frame_stream = None
+                raise
+            return session
+
     def start_continuous(self, buffer_length: int = 2500) -> None:
         with self._stream_lock:
             if not self._claimed:
                 raise RuntimeError("De PDA36AU-verbinding is gesloten")
-            if self._stream_workers_alive():
+            if self._stream_workers_alive() or (
+                self._frame_stream is not None and self._frame_stream.active
+            ):
                 raise RuntimeError("Continuous acquisitie draait al")
 
+            self._frame_stream = None
             self._start_continuous(buffer_length, refresh_scale=True)
 
     def _start_continuous(self, buffer_length: int, *, refresh_scale: bool) -> None:
@@ -1303,6 +1354,8 @@ class PDA36AU:
         with self._stream_lock:
             if not self._claimed:
                 return
+            if self._frame_stream is not None and self._frame_stream.active:
+                raise RuntimeError("Call stop() on the active PDAStream")
             self._stream_stop.set()
 
             try:

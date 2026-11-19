@@ -324,6 +324,29 @@ with PDA36AU() as detector:
     print(scan.channel_1_scaled)
 ```
 
+### Ruwe continue acquisitie
+
+De pagina **Grafieken** leest de echte PDA36AU met de nieuwe continue stream.
+De stream leest alle frames en zet alleen de geselecteerde grafiek- en
+achtergrondblokken om naar volts.
+
+§§§python
+from pda36au import PDA36AU
+
+with PDA36AU(detach_kernel_driver=False) as pda:
+    with pda.start_streaming(free_run=True) as stream:
+        frame = stream.read(timeout=2)
+        print(frame.channels.shape)             # Twee kanalen van 2500 ADC-codes
+        print(frame.received_sample_index, frame.host_received_time_ns)
+§§§
+
+§frame.raw§ bevat de originele USB-bytes. §frame.sample_interval_s§ geeft de
+tijd tussen samples binnen het frame. De ontvangsttijd komt van de hostklok.
+§free_run=True§ zet de triggerflank tijdelijk op **None**. Bij het sluiten
+herstelt de stream de oorspronkelijke flank en bufferlengte.
+§stream.diagnostics§ toont onder meer USB-fouten en gemiste blokken.
+Een volle wachtrij stopt de ruwe stream en meldt de fout aan de lezer.
+
 ## Projectstructuur
 
 | Bestand | Functie |

@@ -3,7 +3,7 @@ import time
 import threading
 import csv
 import io
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from pathlib import Path
 
 import numpy as np
@@ -156,19 +156,34 @@ def start_live():
 def _read_live(background_only=False):
     global live_running, live_status, live_error
     try:
-        with PDA36AU() as pda:
-            pda.start_continuous()
+        with PDA36AU() as pda, ExitStack() as session:
+            stream = None
+            if SIMULATIE and not PDA_CONNECTED:
+                pda.start_continuous()
+                session.callback(pda.stop_continuous)
+            else:
+                stream = session.enter_context(pda.start_streaming(free_run=True))
+            next_update = 0.0
             with lock:
                 live_status = "Achtergrond meten" if background_only else "Live meten"
             while not live_stop_event.is_set():
                 if background_only:
                     with lock:
                         if not background["target"]:
-                            live_stop_event.set()
                             break
-                publish_live_block(pda.read_block())
-                live_stop_event.wait(0.05)
-            pda.stop_continuous()
+                if stream is None:
+                    publish_live_block(pda.read_block())
+                    live_stop_event.wait(0.05)
+                    continue
+
+                # Drain every raw frame, with conversion only for display or baseline.
+                frame = stream.read(timeout=1.0)
+                now = time.monotonic()
+                with lock:
+                    show_frame = now >= next_update or background["target"] > 0
+                if show_frame:
+                    publish_live_block(pda.decode_block(frame.raw))
+                    next_update = now + 0.05
         with lock:
             live_status = "Gestopt"
     except Exception as exc:
