@@ -223,6 +223,19 @@ fout; de applicatie vraagt geen sudo-wachtwoord. De beheerpagina is beschikbaar
 voor iedereen met toegang tot de webinterface; gebruik deze op een vertrouwd netwerk.
 
 
+#### Git-branch wisselen
+
+Open **Raspberry Pi** om de huidige Git-branch van de server te zien. Stop
+lopende metingen, kies een branch en klik op **Branch wisselen**. De lijst bevat
+lokale branches en eerder opgehaalde branches van `origin`. Voor nieuwe branches
+voer je op de server `git fetch origin` uit en open je de Raspberry Pi-pagina opnieuw.
+
+De wissel geldt voor alle gebruikers van deze installatie. Git weigert de
+wissel als lokale wijzigingen of niet-bijgehouden bestanden verloren zouden
+gaan. Herstart de applicatie als NiceGUI de nieuwe branch niet automatisch
+laadt. Kies een branch met deze instelling als je via de webinterface wilt
+terugwisselen.
+
 #### Afsluit- en herstartrechten voor de servicegebruiker
 
 De GUI draait met deze service als `cavity`. Geef deze gebruiker via Polkit

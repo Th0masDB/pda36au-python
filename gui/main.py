@@ -1,5 +1,6 @@
 from nicegui import ui, run
 from datetime import datetime
+import git_control
 import scan_controller
 import pi_control
 from config import APP_VERSION
@@ -20,6 +21,14 @@ def update_sigma_lines(chart, background, baseline):
         changed = changed or chart.options["series"][index]["data"] != points
         chart.options["series"][index]["data"] = points
     return changed
+
+
+def run_when_idle(action, *args):
+    # Voorkom dat een andere browser tijdens de actie een meting start.
+    with scan_controller.lock:
+        if scan_controller.running or scan_controller.live_running:
+            raise RuntimeError("Stop eerst de scan en de live PDA-meting.")
+        return action(*args)
 
 
 def menu():
@@ -46,15 +55,71 @@ def menu():
             on_click=lambda: ui.navigate.to("/grafieken")
         ).props("flat").classes("text-black")
 
-
         if pi_control.get_pi_model():
             ui.button(
                 "Raspberry Pi", icon="settings_power",
                 on_click=lambda: ui.navigate.to("/raspberry-pi"),
             ).props("flat").classes("text-black")
 
+
+async def branch_controls():
+    with ui.column().classes("w-full gap-4"):
+        ui.label("Git-branch wisselen").classes("text-xl font-bold")
+        try:
+            branch_data = await run.io_bound(git_control.get_branches)
+        except RuntimeError as exc:
+            ui.label(str(exc)).classes("text-red-600")
+            return
+        if branch_data is None:
+            return
+
+        current, branches = branch_data
+        current_label = ui.label(
+            f"Huidige Git-branch is {current}" if current else "Losse Git-commit (detached HEAD)"
+        )
+        if not branches:
+            ui.label("Geen Git-branches beschikbaar.")
+            return
+
+        ui.label("Dit wisselt de branch op de server. Kies een branch met deze instelling "
+                 "als je via de webinterface wilt terugwisselen.")
+        with ui.row().classes("gap-4 items-center"):
+            branch_select = ui.select(branches, label="Git-branch", with_input=True,
+                                      value=current if current in branches else None).classes("w-64")
+            switch_button = ui.button("Branch wisselen", icon="swap_horiz")
+        status_label = ui.label("").classes("whitespace-pre-wrap")
+
+        def update_switch_button():
+            switch_button.set_enabled(branch_select.enabled and branch_select.value not in (None, current))
+
+        async def apply_branch():
+            nonlocal current
+            if not switch_button.enabled:
+                return
+            branch = branch_select.value
+            branch_select.disable()
+            switch_button.disable()
+            status_label.set_text("Branch wisselen…")
+            try:
+                switched = await run.io_bound(run_when_idle, git_control.switch_branch, branch)
+            except RuntimeError as exc:
+                status_label.set_text(str(exc))
+            else:
+                if switched is not None:
+                    current = switched
+                    current_label.set_text(f"Huidige Git-branch is {current}")
+                    status_label.set_text("Branch gewijzigd. Herstart de applicatie als die niet automatisch herlaadt.")
+            finally:
+                branch_select.enable()
+                update_switch_button()
+
+        branch_select.on_value_change(update_switch_button)
+        switch_button.on("click", apply_branch)
+        update_switch_button()
+
+
 @ui.page("/raspberry-pi")
-def raspberry_pi():
+async def raspberry_pi():
     model = pi_control.get_pi_model()
     if not model:
         ui.navigate.to("/")
@@ -70,14 +135,6 @@ def raspberry_pi():
                  "volledig uit is voordat je de voeding loskoppelt.")
         status_label = ui.label("")
 
-        def request_power_action(action):
-            # Houd de meetlock vast zodat geen andere browser tijdens het
-            # afsluitverzoek een nieuwe meting kan starten.
-            with scan_controller.lock:
-                if scan_controller.running or scan_controller.live_running:
-                    raise RuntimeError("Stop eerst de scan en de live PDA-meting.")
-                action()
-
         async def confirm_power_action(restart=False):
             dialog.close()
             reboot_dialog.close()
@@ -86,7 +143,7 @@ def raspberry_pi():
             operation = "Herstarten" if restart else "Afsluiten"
             status_label.set_text(f"{operation} aanvragen...")
             try:
-                await run.io_bound(request_power_action,
+                await run.io_bound(run_when_idle,
                                    pi_control.reboot if restart else pi_control.shutdown)
             except Exception as exc:
                 status_label.set_text(f"{operation} mislukt: {exc}")
@@ -123,6 +180,10 @@ def raspberry_pi():
         reboot_button = ui.button(
             "Raspberry Pi herstarten", icon="restart_alt", on_click=reboot_dialog.open,
         )
+
+
+        ui.separator()
+        await branch_controls()
 
 
 @ui.page("/")
