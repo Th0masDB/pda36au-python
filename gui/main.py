@@ -219,7 +219,9 @@ def metingen():
             blocks_input = ui.number(
                 label="PDA blokken per punt", value=1, min=1, max=100, step=1,
             ).classes("w-44")
-            blocks_input.set_enabled(not scan_controller.FAST_SCAN)
+            fast_scan = ui.switch("Snelle scan", value=scan_controller.FAST_SCAN)
+            fast_scan.on_value_change(lambda event: blocks_input.set_enabled(not event.value))
+            blocks_input.set_enabled(not fast_scan.value)
             live_plot = ui.switch("Live grafiek", value=False)
 
         with ui.row().classes("gap-2"):
@@ -298,6 +300,12 @@ def metingen():
             chart.options["yAxis"]["name"] = axis_name
             return changed
 
+        def scan_parameters():
+            step = max(1, min(4095, int(step_input.value or 50)))
+            delay = max(0.0, float(delay_input.value or 0) / 1000.0)
+            aantal_blokken = 1 if fast_scan.value else max(1, int(blocks_input.value or 1))
+            return step, delay, aantal_blokken, bool(fast_scan.value)
+
         async def start_scan(achtergrond=False):
             huidige_status = scan_controller.get_status()
             if huidige_status["running"]:
@@ -306,9 +314,7 @@ def metingen():
                 ui.notify("Stop eerst de live PDA-meting op Grafieken.", type="warning")
                 return
 
-            step = max(1, min(4095, int(step_input.value or 50)))
-            delay = max(0.0, float(delay_input.value or 0) / 1000.0)
-            aantal_blokken = max(1, int(blocks_input.value or 1))
+            step, delay, aantal_blokken, fast = scan_parameters()
 
             if not achtergrond:
                 chart.options["series"][0]["data"] = []
@@ -316,6 +322,7 @@ def metingen():
             chart.update()
             grafiek_status["laatste_aantal"] = 0
             start_button.disable()
+            fast_scan.disable()
             stop_button.enable()
             status_label.set_text("Status: Scannen...")
             error_label.set_text("")
@@ -323,7 +330,7 @@ def metingen():
             try:
                 # Hardware uitlezen in een thread houdt de GUI beschikbaar.
                 await run.io_bound(
-                    scan_controller.scan_cavity, step, delay, aantal_blokken, achtergrond,
+                    scan_controller.scan_cavity, step, delay, aantal_blokken, achtergrond, fast=fast,
                 )
             finally:
                 # Na afloop altijd de volledige grafiek tonen.
@@ -333,6 +340,7 @@ def metingen():
                 chart.update()
                 grafiek_status["laatste_aantal"] = len(punten)
                 start_button.enable()
+                fast_scan.enable()
                 stop_button.disable()
 
         def stop_scan():
@@ -351,6 +359,7 @@ def metingen():
             export_button.set_enabled(data["aantal_punten"] > 0)
             busy = data["running"] or data["live_running"]
             start_button.set_enabled(not busy)
+            fast_scan.set_enabled(not busy)
             background_scan_button.set_enabled(not busy)
             stop_button.set_enabled(data["running"])
             clear_scan_background_button.set_enabled(not busy and data["background"]["value"] is not None)
@@ -358,9 +367,7 @@ def metingen():
             text = reference["status"] + f' — punten: {reference["points"]}'
             if reference["value"] is not None:
                 text += f' — baseline: {reference["value"]:.6g}, σ: {reference["sigma"]:.6g} {reference["y_unit"]}'
-                if reference["settings"] != (int(step_input.value or 50),
-                                              float(delay_input.value or 0) / 1000,
-                                              int(blocks_input.value or 1)):
+                if reference["settings"] != scan_parameters():
                     text += " — Instellingen gewijzigd: meet opnieuw de achtergrond vóór de volgende scan."
             scan_background_label.set_text(text)
             error_label.set_text(data["error"])

@@ -269,12 +269,10 @@ def meet_gemiddelde(pda, aantal_blokken, update_scan_unit=True):
     return total / samples if samples else float("nan")
 
 
-def _fast_limits(step):
-    if not math.isfinite(FAST_SCAN_ADC_OFFSET_MS) or FAST_SCAN_ADC_OFFSET_MS < 0:
-        raise ValueError("FAST_SCAN_ADC_OFFSET_MS moet een niet-negatieve tijd zijn.")
+def _scan_limits(step):
     if SIMULATIE:
         if not PDA_CONNECTED:
-            raise ValueError("Gebruik --sim --PDACon --fast-scan voor een snelle test met de echte PDA.")
+            raise ValueError("Gebruik --sim --PDACon voor een snelle test met de echte PDA.")
         return 4095, 0.0, 0.001
     if FAST_SCAN_LIMITS is None:
         raise ValueError("Vul eerst de geverifieerde FAST_SCAN_LIMITS in config.py in.")
@@ -282,25 +280,31 @@ def _fast_limits(step):
     if (not isinstance(top, int) or not 1 <= top <= 4095
             or not isinstance(step_limit, int) or not 1 <= step <= step_limit <= 4095
             or not all(math.isfinite(ms) and ms > 0 for ms in (forward_ms, return_ms))):
-        raise ValueError("DAC-stap of hardwaregrenzen voor de snelle scan zijn ongeldig.")
+        raise ValueError("DAC-stap of hardwaregrenzen zijn ongeldig.")
     return top, forward_ms / 1000, return_ms / 1000
+
+
+def _require_zero_dac(bus):
+    register = i2c_msg.read(DAC_ADDRESS, 3)
+    bus.i2c_rdwr(register)
+    state, high, low = register
+    if (state & 0x86) != 0x80 or high or (low & 0xf0):
+        raise RuntimeError("Start de scan met een actieve DAC op code nul.")
 
 
 def _fast_points(pda, bus, step, dwell, limits, *, update_scan_unit):
     top, min_dwell, return_dwell = limits
+    if not math.isfinite(FAST_SCAN_ADC_OFFSET_MS) or FAST_SCAN_ADC_OFFSET_MS < 0:
+        raise ValueError("FAST_SCAN_ADC_OFFSET_MS moet een niet-negatieve tijd zijn.")
     if not SIMULATIE:
-        register = i2c_msg.read(DAC_ADDRESS, 3)
-        bus.i2c_rdwr(register)
-        state, high, low = register
-        if (state & 0x86) != 0x80 or high or (low & 0xf0):
-            raise RuntimeError("Snelle scan vereist een actieve DAC die al op code nul staat.")
+        _require_zero_dac(bus)
 
     codes = np.array([*range(0, top, step), top])
     messages = [dac_message(int(code)) for code in codes]
     dwell = max(dwell, min_dwell)
     offset_ns = round(FAST_SCAN_ADC_OFFSET_MS * 1e6)
     completions = []
-    forward_end = None
+    forward_end = return_end = None
     finished = threading.Event()
     failures = []
     sums = np.zeros(len(codes))
@@ -312,7 +316,7 @@ def _fast_points(pda, bus, step, dwell, limits, *, update_scan_unit):
         bus.i2c_rdwr(message)
 
     def drive():
-        nonlocal forward_end
+        nonlocal forward_end, return_end
         try:
             for message in messages:
                 if stop_event.is_set():
@@ -332,6 +336,7 @@ def _fast_points(pda, bus, step, dwell, limits, *, update_scan_unit):
                         write(message)
                 except Exception as exc:
                     failures.append(RuntimeError(f"DAC-terugrit mislukt, uitgang onzeker: {exc}"))
+            return_end = time.monotonic_ns()
             finished.set()
 
     with pda.start_streaming(free_run=True) as stream:
@@ -371,22 +376,46 @@ def _fast_points(pda, bus, step, dwell, limits, *, update_scan_unit):
         detector = detector * scale.y_conversion - scale.y_offset
     else:
         detector -= pda.ADC_MIDSCALE
-    duration_ms = (forward_end - completions[0]) / 1e6 if completions else 0
-    return zip(codes[valid], detector), duration_ms, stream.diagnostics.device_missed_delta
+    forward_ms = (forward_end - completions[0]) / 1e6 if completions else 0
+    return_ms = (return_end - forward_end) / 1e6
+    source = "gesimuleerde DAC" if SIMULATIE else "DAC"
+    timing = f" · {source} · {forward_ms:.1f} ms heen / {return_ms:.1f} ms terug"
+    intervals = np.diff(completions)
+    if intervals.size and intervals.sum() > 0:
+        timing += f" · {1e9 / intervals.mean():.0f} updates/s · langste interval {intervals.max() / 1e6:.3f} ms"
+    timing += f" · {stream.diagnostics.device_missed_delta} gemiste PDA-blokken"
+    return zip(codes[valid], detector), timing
 
 
-def _stepped_points(pda, bus, step, delay, aantal_blokken, *, update_scan_unit):
+def _stepped_points(pda, bus, step, delay, aantal_blokken, limits, *, update_scan_unit):
+    codes = range(0, 4096, step)
+    if limits is not None:
+        _require_zero_dac(bus)
+        top, min_dwell, return_dwell = limits
+        codes = (*range(0, top, step), top)
+        delay = max(delay, min_dwell)
+
     pda.start_continuous()
+    current = 0
     try:
-        for code in range(0, 4096, step):
+        for code in codes:
             if stop_event.is_set():
                 break
+            current = None
             set_dac(bus, code)
+            current = code
             if delay > 0:
                 time.sleep(delay)
             yield code, meet_gemiddelde(pda, aantal_blokken, update_scan_unit=update_scan_unit)
     finally:
-        pda.stop_continuous()
+        try:
+            if limits is not None:
+                while current:
+                    time.sleep(return_dwell)
+                    current = max(0, current - step)
+                    set_dac(bus, current)
+        finally:
+            pda.stop_continuous()
 
 
 # ---------------------------------------------------------
@@ -398,6 +427,8 @@ def scan_cavity(
     delay=0.001,
     aantal_blokken=1,
     achtergrond=False,
+    *,
+    fast=None,
 ):
     """Voer één volledige cavity scan uit."""
 
@@ -406,7 +437,8 @@ def scan_cavity(
     global error
     global scan_y_unit, scan_settings
 
-    settings = (int(step), float(delay), int(aantal_blokken))
+    fast = FAST_SCAN if fast is None else bool(fast)
+    settings = (int(step), float(delay), 1 if fast else int(aantal_blokken), fast)
     if not 1 <= step <= 4095 or not math.isfinite(delay) or delay < 0 or not 1 <= aantal_blokken <= 100:
         raise ValueError("Ongeldige scaninstellingen")
     background_points = []
@@ -431,9 +463,10 @@ def scan_cavity(
 
     bus = None
     timing = ""
+    guarded = fast or (not SIMULATIE and FAST_SCAN_LIMITS is not None)
 
     try:
-        limits = _fast_limits(step) if FAST_SCAN else None
+        limits = _scan_limits(step) if guarded else None
         # I2C-bus openen
         bus = SMBus(I2C_BUS)
 
@@ -442,14 +475,13 @@ def scan_cavity(
 
             gain = pda.get_gain_db()
 
-            if FAST_SCAN:
-                rows, duration_ms, missed = _fast_points(
+            if fast:
+                rows, timing = _fast_points(
                     pda, bus, step, delay, limits, update_scan_unit=not achtergrond,
                 )
-                source = "gesimuleerde DAC" if SIMULATIE else "DAC"
-                timing = f" · {source} · {duration_ms:.1f} ms heen · {missed} gemiste PDA-blokken"
             else:
-                rows = _stepped_points(pda, bus, step, delay, aantal_blokken, update_scan_unit=not achtergrond)
+                rows = _stepped_points(pda, bus, step, delay, aantal_blokken, limits,
+                                       update_scan_unit=not achtergrond)
 
             for dac_value, gemiddelde in rows:
                 with lock:
@@ -459,7 +491,7 @@ def scan_cavity(
                     else:
                         punten.append([float(dac_value), float(gemiddelde)])
 
-            if not FAST_SCAN:
+            if not guarded:
                 set_dac(bus, 0)
 
         # Alleen "klaar" melden wanneer
@@ -477,7 +509,7 @@ def scan_cavity(
                                                sigma=float(np.std(values, ddof=1)),
                                                y_unit=live_block["y_unit"], settings=settings,
                                                status="Achtergrondscan klaar")
-                        status = "Achtergrondscan klaar"
+                        status = f"Achtergrondscan klaar{timing}"
                     else:
                         scan_background["status"] = "Achtergrondscan mislukt: minder dan twee geldige punten"
                         status = scan_background["status"]
@@ -497,7 +529,7 @@ def scan_cavity(
 
         # Bij een fout proberen de DAC
         # alsnog terug naar nul te zetten
-        if bus is not None and not FAST_SCAN:
+        if bus is not None and not guarded:
 
             try:
                 set_dac(

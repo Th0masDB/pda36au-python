@@ -131,28 +131,55 @@ Ga naar **Scan**, stel de meetparameters in en klik op **Start scan**:
 | PDA blokken per punt | Aantal meetblokken waarvan het detectorsignaal wordt gemiddeld | 1 |
 | Live grafiek | Scangrafiek tijdens de meting bijwerken, maximaal twee keer per seconde | Uit |
 
-Met **Stop** vraag je de scan te stoppen. Na afloop verschijnt de volledige
-scangrafiek, ook als **Live grafiek** uit stond. De controller probeert de DAC
-na afloop, bij stoppen en bij een fout terug op nul te zetten.
+Met **Stop** vraag je de scan te stoppen. Na afloop verschijnt de scangrafiek,
+ook als **Live grafiek** uit stond. Met ingestelde hardwaregrenzen keert de
+DAC bij een bekende uitgangsstand stapsgewijs terug naar nul.
 
 #### Snelle scan
 
+Zet **Snelle scan** aan of uit op de pagina **Scan** tussen metingen.
+`--fast-scan` zet de schakelaar bij het opstarten alvast aan.
+
 ```bash
-python gui/main.py --sim --PDACon --fast-scan
+python gui/main.py --sim --PDACon
 ```
 
 De DAC schrijft onafhankelijk van de continue PDA-stream. **Delay per stap**
 blijft de minimale wachttijd na een write. Met 0 ms test je de snelste
 simulatie. De grafiek en CSV tonen het gemiddelde van de samples per
 geschatte DAC-code van de opgaande sweep. De uitlijning gebruikt de USB-ontvangsttijd
-en de instelbare `FAST_SCAN_ADC_OFFSET_MS`. De status geeft de gemeten duur van
-de opgaande sweep en het aantal gemiste detectorblokken.
+en de instelbare `FAST_SCAN_ADC_OFFSET_MS`. De status toont de gemeten heen- en
+terugtijd, updates per seconde, het langste interval tussen voorwaartse writes
+en het aantal gemiste detectorblokken.
 
-Op de Pi activeert `--fast-scan` deze modus nadat `FAST_SCAN_LIMITS` in
-`config.py` is ingevuld met de goedgekeurde maximale DAC-code, maximale stap
-en minimale wachttijden voor heen en terug in ms. Bepaal die waarden op basis
-van de gemeten DAC-voeding en de belaste versterker en piezo. Start met een
-actieve DAC op code nul. De terugrit gebruikt dezelfde beperkte stappen.
+#### Grenzen op de Raspberry Pi bepalen
+
+Vul `FAST_SCAN_LIMITS` in `config.py` in als
+`(max_code, max_stap_codes, min_heen_ms, min_terug_ms)` en herstart de app.
+Beide wachttijden gelden per DAC-stap. De ingestelde hardwaregrenzen en de
+begrensde terugrit gelden voor beide scanmodi. Start met een actieve DAC op
+code nul.
+
+1. Meet de DAC-voedingsspanning `VDD`. Bepaal de hoogste veilige DAC-spanning
+   aan de ingang van de piezoversterker, inclusief marge. Bereken `max_code`
+   door `4096 × veilige_DAC_spanning / VDD` naar beneden af te ronden en te
+   begrenzen op 4095. Controleer met een multimeter of oscilloscoop.
+   [MCP4725-datasheet](https://ww1.microchip.com/downloads/en/DeviceDoc/MCP4725-Data-Sheet-20002039E.pdf)
+2. Bepaal de grootste veilige stap en de wachttijd per richting uit de
+   specificaties en de staprespons van de belaste versterker en piezo. Gebruik
+   de versterking, stroomlimieten bij laden en ontladen en de insteltijd.
+   Een stap van `n` codes verandert de DAC-spanning met `n × VDD / 4096`.
+   [Elektrische eigenschappen van piezoactuatoren](https://www.pi-usa.us/en/expertise/technology/piezo-technology/properties-piezo-actuators/electrical-operation)
+3. Test eerst met de piezoversterker losgekoppeld of uitgeschakeld. Als de
+   bedrading en niveauomzetting het toelaten, stelt
+   `dtparam=i2c_arm=on,i2c_arm_baudrate=400000` de Pi in op 400 kHz. Houd 5 V
+   buiten de 3,3 V GPIO-pinnen. Meet de bussnelheid en lees in **Snelle scan**
+   het behaalde aantal updates/s en het langste interval af. Controleer met de
+   belaste opstelling vervolgens een kleine, langzame scan en vergelijk de
+   resonanties bij hogere snelheid. Behoud de snelste instellingen die de
+   hardwaregrenzen en de gewenste meetkwaliteit respecteren.
+   [Pi I²C-configuratie](https://www.raspberrypi.com/documentation/computers/configuration.html#dt-parameters)
+   · [Pi GPIO](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#gpio)
 
 ### Live PDA-signaal
 
