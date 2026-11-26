@@ -211,7 +211,7 @@ def metingen():
         # Instellingen en bediening
         with ui.row().classes("gap-4 items-center"):
             step_input = ui.number(
-                label="DAC stapgrootte", value=50, min=1, max=4095, step=1,
+                label="DAC stapgrootte", value=scan_controller.DEFAULT_SCAN_STEP, min=1, max=4095, step=1,
             ).classes("w-44")
             delay_input = ui.number(
                 label="Extra wachttijd na trigger (ms)", value=0, min=0, step=0.1,
@@ -344,7 +344,7 @@ def metingen():
                 ui.notify("Stop eerst de live PDA-meting op Grafieken.", type="warning")
                 return
 
-            step = max(1, min(4095, int(step_input.value or 50)))
+            step = max(1, min(4095, int(step_input.value or scan_controller.DEFAULT_SCAN_STEP)))
             delay = max(0.0, float(delay_input.value or 0) / 1000.0)
             aantal_blokken = max(1, int(blocks_input.value or 1))
             timing_code = int(timing_code_input.value or scan_controller.DEFAULT_TIMING_CODE)
@@ -362,7 +362,7 @@ def metingen():
             try:
                 # Hardware uitlezen in een thread houdt de GUI beschikbaar.
                 if timing_only:
-                    await run.io_bound(scan_controller.measure_timing, timing_code)
+                    await run.io_bound(scan_controller.measure_timing, timing_code, step=step)
                 else:
                     await run.io_bound(
                         scan_controller.scan_cavity, step, delay, aantal_blokken, achtergrond, timing_code=timing_code,
@@ -399,7 +399,7 @@ def metingen():
             text = reference["status"] + f' — punten: {reference["points"]}'
             if reference["value"] is not None:
                 text += f' — baseline: {reference["value"]:.6g}, σ: {reference["sigma"]:.6g} {reference["y_unit"]}'
-                if reference["settings"] != (int(step_input.value or 50),
+                if reference["settings"] != (int(step_input.value or scan_controller.DEFAULT_SCAN_STEP),
                                               float(delay_input.value or 0) / 1000,
                                               int(blocks_input.value or 1)):
                     text += " — Instellingen gewijzigd: meet opnieuw de achtergrond vóór de volgende scan."

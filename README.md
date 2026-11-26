@@ -137,13 +137,18 @@ De kolom **Aantal** toont hoeveel metingen aan elke regel hebben bijgedragen.
 Dezelfde timingtest kan op een Pi zonder browser worden gestart.
 
 ```bash
-python scan.py --timing
+python scan.py --timing --step 50
 ```
 
 Stel de meetparameters in en klik op **Start scan**. De scan voert eerst de
-timingtest uit. Die meet de ruis op losse samples en op gemiddelden over 16
-opeenvolgende samples. **Minimale DAC-stap** is de kleinste stap waarbij de
-gemeten banden voor de oude en nieuwe stand elkaar niet overlappen.
+timingtest uit. Na de bevestiging van de overgang leest die nieuwe blokken voor
+de ruismeting. De test kiest het kortste venster van 16 tot 256 samples dat de
+ingestelde stap kan onderscheiden. Als de stap voor alle vensters te klein is,
+toont de test het venster met de laagste gemeten ondergrens.
+
+**Kanaal 2 vensterbreedte** toont het gekozen aantal samples.
+**Minimale DAC-stap** is de kleinste stap waarbij de gemeten banden voor de
+oude en nieuwe stand elkaar niet overlappen met dat venster.
 
 Per DAC-stap bevestigen drie opeenvolgende meetvensters op kanaal 2 de nieuwe
 stand. Kanaal 1 wordt gemiddeld over de daaropvolgende samples waarvan zowel het

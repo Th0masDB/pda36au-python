@@ -8,8 +8,10 @@ from time import monotonic_ns
 import numpy as np
 
 
+DEFAULT_SCAN_STEP = 50
 DEFAULT_TIMING_CODE = 1024
-FEEDBACK_WINDOW_SAMPLES = 16
+FEEDBACK_WINDOWS = (16, 32, 64, 128, 256)
+PLATEAU_BLOCKS = 4
 # Foutgrens bij uitblijven van data of feedback. Dit is geen meetvertraging.
 TIMEOUT_NS = 5_000_000_000
 
@@ -165,12 +167,37 @@ def _level(values, resolution):
     return level, margin
 
 
-def _plateau(blocks, window):
-    feedback = [np.asarray(block.analog) for block in blocks]
-    resolution = blocks[-1].y_resolution
-    _, sample_margin = _level(np.concatenate(feedback), resolution)
-    level, margin = _level(np.concatenate([_window_means(values, window) for values in feedback]), resolution)
-    return level, margin, sample_margin
+def _calibrate(zero_blocks, high_blocks, reference_code, step):
+    zero_samples = [np.asarray(block.analog) for block in zero_blocks]
+    high_samples = [np.asarray(block.analog) for block in high_blocks]
+    block = zero_blocks[-1]
+    resolution = max(block.y_resolution, high_blocks[-1].y_resolution)
+    period = block.sample_period_s
+    if period is not None and period <= 0:
+        period = None
+    sample_margin = max(_level(np.concatenate(samples), resolution)[1]
+                        for samples in (zero_samples, high_samples))
+    block_size = len(block.analog)
+    max_window = max(1, block_size // 3)
+    windows = sorted({min(window, max_window) for window in FEEDBACK_WINDOWS})
+
+    best = None
+    for window in windows:
+        (zero, zero_margin), (high, high_margin) = (
+            _level(np.concatenate([_window_means(values, window) for values in samples]), resolution)
+            for samples in (zero_samples, high_samples)
+        )
+        if high == zero:
+            continue
+        calibration = Calibration(zero, (high - zero) / reference_code, max(zero_margin, high_margin),
+                                  period, block_size, window, sample_margin)
+        if step >= calibration.minimum_step:
+            return calibration
+        if best is None or calibration.minimum_step < best.minimum_step:
+            best = calibration
+    if best is None:
+        raise RuntimeError("Geen meetbaar niveauverschil op PDA-kanaal 2.")
+    return best
 
 
 def measure_usb(pda, stop_event):
@@ -184,12 +211,12 @@ def measure_usb(pda, stop_event):
     return durations
 
 
-def benchmark(acquisition, reference_code, usb_ms):
+def benchmark(acquisition, reference_code, usb_ms, *, step=DEFAULT_SCAN_STEP):
     """Meet de PDA-doorvoer, kalibreer de DAC-feedback en meet acht overgangen."""
     start_ns = monotonic_ns()
     receipts = []
     samples = 0
-    zero_blocks = deque(maxlen=4)
+    zero_blocks = deque(maxlen=PLATEAU_BLOCKS)
     for index in range(32):
         block, _ = acquisition.read(monotonic_ns() + TIMEOUT_NS, since_ns=start_ns)
         receipts.append(block.received_ns)
@@ -197,12 +224,8 @@ def benchmark(acquisition, reference_code, usb_ms):
         if index:
             samples += len(block.analog)
 
-    window = max(1, min(FEEDBACK_WINDOW_SAMPLES, len(block.analog) // 3))
-    zero, margin, sample_margin = _plateau(zero_blocks, window)
+    zero, sample_margin = _level(np.concatenate([frame.analog for frame in zero_blocks]), block.y_resolution)
     acquisition.show_block(block)
-    period = block.sample_period_s
-    if period is not None and period <= 0:
-        period = None
 
     # De referentiespanning wordt gemeten terwijl beide kanalen blijven lopen.
     acquisition.check_stop()
@@ -219,14 +242,17 @@ def benchmark(acquisition, reference_code, usb_ms):
         if abs(high - zero) <= 4 * max(sample_margin, noise):
             candidate = None
             continue
-        if candidate is not None and abs(high - candidate[0]) <= max(sample_margin, noise):
+        if candidate is not None and abs(high - candidate) <= max(sample_margin, noise):
             break
-        candidate = (high, high_block)
+        candidate = high
 
-    high, high_margin, high_sample_margin = _plateau((candidate[1], high_block), window)
-    calibration = Calibration(zero, (high - zero) / reference_code,
-                              max(margin, high_margin), period, len(block.analog),
-                              window, max(sample_margin, high_sample_margin))
+    # De blokken die de overgang bevestigen kunnen nog samples uit de flank bevatten.
+    high_blocks = [acquisition.read(monotonic_ns() + TIMEOUT_NS, since_ns=begin_ns)[0]
+                   for _ in range(PLATEAU_BLOCKS)]
+    calibration = _calibrate(zero_blocks, high_blocks, reference_code, step)
+    zero = calibration.zero
+    high = zero + reference_code * calibration.per_code
+    period = calibration.sample_period_s
     transitions = []
     for code in (0, reference_code) * 4:
         previous, target = (zero, high) if code else (high, zero)
@@ -240,6 +266,7 @@ def benchmark(acquisition, reference_code, usb_ms):
         _row("PDA blokinterval op de host (ms)", intervals),
         _row("PDA ontvangen samples/s per kanaal", [samples / seconds] if seconds > 0 else []),
         _row("Kanaal 2 meetmarge per sample (DAC-codes)", [calibration.sample_margin / abs(calibration.per_code)]),
+        _row("Kanaal 2 vensterbreedte (samples)", [calibration.window_samples]),
         _row("Kanaal 2 meetmarge per venster (DAC-codes)", [calibration.margin / abs(calibration.per_code)]),
         _row("Minimale DAC-stap (codes)", [calibration.minimum_step]),
         *step_rows(transitions),

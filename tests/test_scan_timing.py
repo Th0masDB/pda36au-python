@@ -29,9 +29,21 @@ class NoisyPDA(simulation.PDA36AU):
 
     def read_block(self, **kwargs):
         block = super().read_block(**kwargs)
-        pattern = np.repeat([-9.013, 9.013], self.noise_samples) * (3.3 / 4095)
+        pattern = np.repeat([-23.474, 23.474], self.noise_samples) * (3.3 / 4095)
         noise = np.tile(pattern, block.analog.size // pattern.size)
         block.analog[:noise.size] += noise
+        return block
+
+
+class SettlingPDA(simulation.PDA36AU):
+    def read_block(self, **kwargs):
+        previous = self.previous_value
+        block = super().read_block(**kwargs)
+        code = self.previous_value
+        if code != previous:
+            block.analog[:] = code * 3.3 / 4095
+            tail = np.sign(code - previous) * (3.3 / 4095) * np.linspace(26, 0, 512)
+            block.analog[:tail.size] -= tail
         return block
 
 
@@ -86,21 +98,33 @@ class FeedbackTests(unittest.TestCase):
         self.assertIsNone(result.edge_us)
         self.assertEqual(len(self.blocks[0].analog), 28)
 
-    def test_benchmark_distinguishes_short_and_correlated_noise(self):
-        for noise_samples, minimum_step in ((1, 1), (16, 55)):
-            with self.subTest(noise_samples=noise_samples), patch.object(simulation, "dac_value", 0):
+    def test_benchmark_selects_shortest_adequate_window(self):
+        cases = ((1, 50, 16, 1), (32, 50, 64, 1), (32, 141, 16, 141), (256, 50, 16, 141))
+        for noise_samples, step, window, minimum_step in cases:
+            with self.subTest(noise_samples=noise_samples, step=step), patch.object(simulation, "dac_value", 0):
                 pda = NoisyPDA(noise_samples)
                 pda.start_continuous()
                 acquisition = Acquisition(pda, lambda code: setattr(simulation, "dac_value", code),
                                           threading.Event(), self.blocks.append)
-                calibration, _ = benchmark(acquisition, 1024, [])
-                self.assertAlmostEqual(calibration.sample_margin / abs(calibration.per_code), 27.039)
+                calibration, _ = benchmark(acquisition, 1024, [], step=step)
+                self.assertAlmostEqual(calibration.sample_margin / abs(calibration.per_code), 70.422)
+                self.assertEqual(calibration.window_samples, window)
                 self.assertEqual(calibration.minimum_step, minimum_step)
-                if minimum_step <= 50:
+                if step == 50 and minimum_step <= step:
                     acquisition.step(calibration, 0, 1024 * calibration.per_code, calibration.zero)
                     point = acquisition.step(calibration, 50, calibration.zero,
                                              calibration.zero + 50 * calibration.per_code, samples=2500)
-                    self.assertAlmostEqual(point.feedback / calibration.per_code, 50)
+                    self.assertAlmostEqual(point.feedback / calibration.per_code, 50, delta=0.05)
+
+    def test_benchmark_measures_noise_after_the_settling_tail(self):
+        with patch.object(simulation, "dac_value", 0):
+            pda = SettlingPDA()
+            pda.start_continuous()
+            acquisition = Acquisition(pda, lambda code: setattr(simulation, "dac_value", code),
+                                      threading.Event(), self.blocks.append)
+            calibration, _ = benchmark(acquisition, 1024, [])
+            self.assertEqual(calibration.minimum_step, 1)
+            self.assertEqual(calibration.window_samples, 16)
 
 
 if __name__ == "__main__":

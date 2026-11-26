@@ -19,7 +19,7 @@ sys.path.append(str(ROOT))
 
 from config import I2C_BUS, DAC_ADDRESS
 from gui.scan_timing import (
-    DEFAULT_TIMING_CODE, Acquisition, MeasurementStopped, benchmark, measure_usb, step_rows,
+    DEFAULT_SCAN_STEP, DEFAULT_TIMING_CODE, Acquisition, MeasurementStopped, benchmark, measure_usb, step_rows,
 )
 
 # ---------------------------------------------------------
@@ -276,12 +276,12 @@ def set_manual_dac(value):
 # Cavity scan
 # ---------------------------------------------------------
 
-def measure_timing(reference_code=DEFAULT_TIMING_CODE):
-    scan_cavity(timing_code=reference_code, timing_only=True)
+def measure_timing(reference_code=DEFAULT_TIMING_CODE, *, step=DEFAULT_SCAN_STEP):
+    scan_cavity(step=step, timing_code=reference_code, timing_only=True)
 
 
 def scan_cavity(
-    step=50,
+    step=DEFAULT_SCAN_STEP,
     delay=0,
     aantal_blokken=1,
     achtergrond=False,
@@ -337,7 +337,7 @@ def scan_cavity(
                         capture = Acquisition(
                             pda, write_dac, stop_event, partial(
                                 publish_live_block, update_scan_unit=not timing_only and not achtergrond))
-                        calibration, rows = benchmark(capture, timing_code, usb_ms)
+                        calibration, rows = benchmark(capture, timing_code, usb_ms, step=step)
                         with lock:
                             timing["benchmark"] = rows
                         if not timing_only:

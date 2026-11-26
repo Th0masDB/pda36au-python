@@ -18,16 +18,20 @@ def main():
     parser.add_argument("--timing", action="store_true", help="Voer alleen de timingtest uit.")
     parser.add_argument("--timing-code", type=int, default=scan_controller.DEFAULT_TIMING_CODE,
                         help="Referentiecode voor de DAC-timingtest.")
+    parser.add_argument("--step", type=int, default=scan_controller.DEFAULT_SCAN_STEP,
+                        help="DAC-stapgrootte voor de timingtest en scan.")
     parser.add_argument("--sim", "--simulatie", action="store_true")
     parser.add_argument("--PDACon", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.timing_code <= 4095:
         parser.error("--timing-code moet tussen 1 en 4095 liggen.")
+    if not 1 <= args.step <= 4095:
+        parser.error("--step moet tussen 1 en 4095 liggen.")
 
     if args.timing:
-        scan_controller.measure_timing(args.timing_code)
+        scan_controller.measure_timing(args.timing_code, step=args.step)
     else:
-        scan_controller.scan_cavity(timing_code=args.timing_code)
+        scan_controller.scan_cavity(step=args.step, timing_code=args.timing_code)
 
     if scan_controller.SIMULATIE:
         print("Simulatie")
