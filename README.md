@@ -25,7 +25,7 @@ In de webinterface:
 
 - cavity scannen met instelbare DAC-stapgrootte, wachttijd en PDA-blokken per meetpunt;
 - scans handmatig stoppen;
-- het gemiddelde detectorsignaal per DAC-waarde weergeven;
+- het gemiddelde detectorsignaal en de DAC-feedback per DAC-waarde weergeven;
 - de scangrafiek optioneel tijdens de scan bijwerken;
 - het nieuwste PDA-meetblok live bekijken, ook zonder scan;
 - volledig simuleren of een echte PDA combineren met een gesimuleerde DAC.
@@ -128,8 +128,14 @@ Ga naar **Scan**, stel de meetparameters in en klik op **Start scan**:
 | --- | --- | --- |
 | DAC stapgrootte | Stap tussen opeenvolgende DAC-waarden binnen 0–4095 | 50 |
 | Delay per stap (ms) | Wachttijd na het instellen van de DAC | 1 ms |
-| PDA blokken per punt | Aantal meetblokken waarvan het detectorsignaal wordt gemiddeld | 1 |
+| PDA blokken per punt | Aantal meetblokken waarover beide kanalen worden gemiddeld | 1 |
 | Live grafiek | Scangrafiek tijdens de meting bijwerken, maximaal twee keer per seconde | Uit |
+
+Per DAC-stap toont de scangrafiek het gemiddelde detectorsignaal van kanaal 1
+en de gemeten DAC-feedback van kanaal 2 op de rechter y-as. **Exporteer CSV**
+neemt beide kanalen op in dezelfde eenheid, met kanaal 2 in de kolom
+`dac_feedback`. De achtergrondscan bepaalt de baseline en σ voor kanaal 1.
+Het losse script `python scan.py` toont ook beide kanalen.
 
 Met **Stop** vraag je de scan te stoppen. Na afloop verschijnt de volledige
 scangrafiek, ook als **Live grafiek** uit stond. De controller probeert de DAC

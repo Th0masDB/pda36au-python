@@ -1,80 +1,35 @@
-import numpy as np
-import time
-import sys
-from contextlib import suppress
 import matplotlib.pyplot as plt
-from config import I2C_BUS, DAC_ADDRESS
 
-SIMULATIE = "--simulatie" in sys.argv or "--sim" in sys.argv
-PDA_Connected = "--PDACon" in sys.argv
-
-if SIMULATIE and PDA_Connected:
-    from simulation import SMBus, i2c_msg
-    from pda36au import PDA36AU
-if SIMULATIE:
-    from simulation import SMBus, i2c_msg, PDA36AU
-else:
-    from smbus2 import SMBus, i2c_msg
-    from pda36au import PDA36AU
+from gui import scan_controller
 
 
-bus = SMBus(I2C_BUS)
-STEP= 50
+STEP = 50
 DELAY = 0.001
 AANTAL_BLOKKEN = 1
 
-def meet_gemiddelde(pda, aantal_blokken=5):
-    total = 0.0
-    samples = 0
 
-    for _ in range(aantal_blokken):
-        values = np.asarray(pda.read_block().detector)
-        total += float(values.sum(dtype=np.float64))
-        samples += values.size
+def main():
+    scan_controller.scan_cavity(step=STEP, delay=DELAY, aantal_blokken=AANTAL_BLOKKEN)
+    status = scan_controller.get_status()
+    if status["error"]:
+        raise SystemExit(status["error"])
+    print(status["status"])
 
-    return total / samples if samples else float("nan")
+    punten = scan_controller.get_points(include_feedback=True)
+    if not punten:
+        return
 
-def set_dac(value):
-    value = max(0, min(4095, value))
-
-    byte1 = (value >> 8) & 0x0F
-    byte2 = value & 0xFF
-
-    msg = i2c_msg.write(DAC_ADDRESS, [byte1, byte2])
-    bus.i2c_rdwr(msg)
-
-def scan_cavity():
-    pda.start_continuous()
-    x = []
-    try:
-        for i in range(0, 4096, STEP):
-
-            set_dac(i)
-
-            if DELAY > 0:
-                time.sleep(DELAY)
-
-            gemiddelde = meet_gemiddelde(
-                pda,
-                aantal_blokken=AANTAL_BLOKKEN
-            )
-
-            x.append([i, gemiddelde])
-
-        pda.stop_continuous()
-    except BaseException:
-        with suppress(Exception):
-            set_dac(0)
-        raise
-
-    set_dac(0)
-
-    return np.array(x)
-
-
-with PDA36AU() as pda:
-    print(pda.get_gain_db())
-    x = scan_cavity()
-    plt.plot(x[:,0], x[:,1])
+    codes, detector, feedback = zip(*punten)
+    figure, detector_axis = plt.subplots()
+    feedback_axis = detector_axis.twinx()
+    unit = f' ({status["y_unit"]})' if status["y_unit"] else ""
+    detector_axis.set(xlabel="DAC waarde", ylabel=f"Kanaal 1 (detector){unit}")
+    feedback_axis.set_ylabel(f"Kanaal 2 (DAC){unit}")
+    detector_axis.plot(codes, detector)
+    feedback_axis.plot(codes, feedback, color="tab:green")
+    figure.tight_layout()
     plt.show()
-    # print(x[:,0])
+
+
+if __name__ == "__main__":
+    main()

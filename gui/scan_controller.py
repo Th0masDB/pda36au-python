@@ -272,8 +272,9 @@ def set_manual_dac(value):
 # ---------------------------------------------------------
 
 def meet_gemiddelde(pda, aantal_blokken, update_scan_unit=True):
-    """Lees PDA-blokken en bereken het gemiddelde."""
-    total = 0.0
+    """Bereken het detector- en DAC-gemiddelde uit dezelfde PDA-blokken."""
+    detector_total = 0.0
+    feedback_total = 0.0
     samples = 0
 
     for _ in range(aantal_blokken):
@@ -282,11 +283,15 @@ def meet_gemiddelde(pda, aantal_blokken, update_scan_unit=True):
 
         block = pda.read_block()
         publish_live_block(block, update_scan_unit=update_scan_unit)
-        values = np.asarray(block.detector)
-        total += float(values.sum(dtype=np.float64))
-        samples += values.size
+        detector = np.asarray(block.detector)
+        feedback = np.asarray(block.analog)
+        detector_total += float(detector.sum(dtype=np.float64))
+        feedback_total += float(feedback.sum(dtype=np.float64))
+        samples += detector.size
 
-    return total / samples if samples else float("nan")
+    if not samples:
+        return float("nan"), float("nan")
+    return detector_total / samples, feedback_total / samples
 
 
 # ---------------------------------------------------------
@@ -370,8 +375,8 @@ def scan_cavity(
                     if delay > 0:
                         time.sleep(delay)
 
-                    # Detector meten
-                    gemiddelde = meet_gemiddelde(
+                    # Detector en DAC-feedback meten
+                    detector, feedback = meet_gemiddelde(
                         pda,
                         aantal_blokken, update_scan_unit=not achtergrond,
                     )
@@ -380,10 +385,10 @@ def scan_cavity(
                     with lock:
 
                         if achtergrond:
-                            background_points.append(gemiddelde)
+                            background_points.append(detector)
                             scan_background["points"] = len(background_points)
                         else:
-                            punten.append([float(dac_value), gemiddelde])
+                            punten.append([float(dac_value), detector, feedback])
 
             except BaseException:
                 with suppress(Exception):
@@ -499,9 +504,9 @@ def get_status():
         }
 
 
-def get_points():
+def get_points(*, include_feedback=False):
     """
-    Geef alle meetpunten terug.
+    Geef de detectorpunten terug, desgewenst met DAC-feedback erbij.
 
     Deze functie gebruiken we alleen wanneer
     de grafiek echt bijgewerkt moet worden.
@@ -509,7 +514,7 @@ def get_points():
 
     with lock:
 
-        return list(punten)
+        return list(punten) if include_feedback else [point[:2] for point in punten]
 
 
 def export_scan_csv():
@@ -528,11 +533,12 @@ def export_scan_csv():
     output = io.StringIO(newline="")
     writer = csv.writer(output)
     writer.writerow(["dac_waarde", "detectorsignaal", "eenheid", "baseline",
-                     "sigma", "baseline_min_2sigma", "baseline_plus_2sigma"])
-    for dac, signal in rows:
+                     "sigma", "baseline_min_2sigma", "baseline_plus_2sigma", "dac_feedback"])
+    for dac, signal, feedback in rows:
         writer.writerow([dac, signal if np.isfinite(signal) else "", unit,
                          baseline if baseline is not None else "",
-                         sigma if sigma is not None else "", lower, upper])
+                         sigma if sigma is not None else "", lower, upper,
+                         feedback if np.isfinite(feedback) else ""])
     return output.getvalue().encode("utf-8-sig")
 
 

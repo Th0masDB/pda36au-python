@@ -240,7 +240,7 @@ def metingen():
 
         with ui.expansion("Achtergrondscan", icon="settings", value=False).classes("w-full"):
             ui.label("Dek de laser af en meet de achtergrond met de scaninstellingen hierboven. "
-                     "De DAC doorloopt hetzelfde bereik. σ wordt berekend over de gemiddelde scanpunten.")
+                     "De DAC doorloopt hetzelfde bereik. σ wordt berekend over de gemiddelde scanpunten van kanaal 1.")
             with ui.row().classes("gap-2"):
                 background_scan_button = ui.button("Meet achtergrondscan", icon="horizontal_rule")
                 clear_scan_background_button = ui.button(
@@ -251,12 +251,14 @@ def metingen():
         points_label = ui.label("Meetpunten: 0")
         error_label = ui.label("").classes("text-red-600")
 
+        detector_name = "Kanaal 1 (detector)"
+        dac_name = "Kanaal 2 (DAC)"
         chart = ui.echart({
             "animation": False,
             "tooltip": {"trigger": "axis"},
-            "grid": {"left": 80, "right": 45, "top": 45, "bottom": 85,
+            "grid": {"left": 80, "right": 70, "top": 45, "bottom": 85,
                      "containLabel": True},
-            "legend": {"data": ["PDA36AU", "Baseline", "Baseline + 2σ", "Baseline − 2σ"]},
+            "legend": {"data": [detector_name, dac_name, "Baseline", "Baseline + 2σ", "Baseline − 2σ"]},
             "xAxis": {
                 "type": "value", "name": "DAC waarde",
                 "nameLocation": "middle", "nameGap": 45, "min": 0, "max": 4095,
@@ -265,19 +267,32 @@ def metingen():
                               "hideOverlap": True},
                 "nameTextStyle": {"fontSize": 14, "color": "#374151"},
             },
-            "yAxis": {
+            "yAxis": [{
                 "type": "value", "name": "Detectorsignaal",
                 "nameLocation": "middle", "nameGap": 50, "scale": True,
-            },
+            }, {
+                "type": "value", "name": "DAC-feedback",
+                "nameLocation": "middle", "nameGap": 45, "scale": True,
+                "splitLine": {"show": False},
+            }],
             "series": [{
-                "name": "PDA36AU", "type": "line", "showSymbol": False, "data": [],
+                "name": detector_name, "type": "line", "showSymbol": False, "data": [],
             }, {
                 "name": "Baseline", "type": "line", "showSymbol": False,
                 "lineStyle": {"type": "dashed", "width": 2},
                 "itemStyle": {"color": "#d97706"}, "data": [],
-            }, *sigma_series()],
+            }, *sigma_series(), {
+                "name": dac_name, "type": "line", "yAxisIndex": 1, "showSymbol": False,
+                "itemStyle": {"color": "#0f766e"}, "data": [],
+            }],
         }).classes("w-full").style("height: 500px")
-        grafiek_status = {"laatste_aantal": 0}
+        laatste_aantal = 0
+
+        def update_scan_series(punten):
+            nonlocal laatste_aantal
+            chart.options["series"][0]["data"] = [[code, detector] for code, detector, _ in punten]
+            chart.options["series"][-1]["data"] = [[code, feedback] for code, _, feedback in punten]
+            laatste_aantal = len(punten)
 
         def update_scan_baseline(data):
             background = data["background"]
@@ -293,8 +308,11 @@ def metingen():
             changed = changed or sigma_changed
             display_unit = unit if unit is not None else background["y_unit"]
             axis_name = f"Detectorsignaal ({display_unit})" if display_unit else "Detectorsignaal"
-            changed = changed or chart.options["yAxis"]["name"] != axis_name
-            chart.options["yAxis"]["name"] = axis_name
+            dac_axis_name = f"DAC-feedback ({unit})" if unit else "DAC-feedback"
+            detector_axis, dac_axis = chart.options["yAxis"]
+            changed = changed or detector_axis["name"] != axis_name or dac_axis["name"] != dac_axis_name
+            detector_axis["name"] = axis_name
+            dac_axis["name"] = dac_axis_name
             return changed
 
         async def start_scan(achtergrond=False):
@@ -310,10 +328,9 @@ def metingen():
             aantal_blokken = max(1, int(blocks_input.value or 1))
 
             if not achtergrond:
-                chart.options["series"][0]["data"] = []
+                update_scan_series([])
             update_scan_baseline(scan_controller.get_status())
             chart.update()
-            grafiek_status["laatste_aantal"] = 0
             start_button.disable()
             stop_button.enable()
             status_label.set_text("Status: Scannen...")
@@ -326,13 +343,12 @@ def metingen():
                 )
             finally:
                 # Na afloop altijd de volledige grafiek tonen.
-                punten = scan_controller.get_points()
-                chart.options["series"][0]["data"] = punten
-                update_scan_baseline(scan_controller.get_status())
-                chart.update()
-                grafiek_status["laatste_aantal"] = len(punten)
-                start_button.enable()
-                stop_button.disable()
+                if not chart.is_deleted:
+                    update_scan_series(scan_controller.get_points(include_feedback=True))
+                    update_scan_baseline(scan_controller.get_status())
+                    chart.update()
+                    start_button.enable()
+                    stop_button.disable()
 
         def stop_scan():
             scan_controller.stop_scan()
@@ -365,11 +381,9 @@ def metingen():
             error_label.set_text(data["error"])
 
             chart_changed = update_scan_baseline(data)
-            if (live_plot.value and data["running"]
-                    and data["aantal_punten"] != grafiek_status["laatste_aantal"]):
-                punten = scan_controller.get_points()
-                chart.options["series"][0]["data"] = punten
-                grafiek_status["laatste_aantal"] = len(punten)
+            if ((live_plot.value or not data["running"])
+                    and data["aantal_punten"] != laatste_aantal):
+                update_scan_series(scan_controller.get_points(include_feedback=True))
                 chart_changed = True
             if chart_changed:
                 chart.update()
