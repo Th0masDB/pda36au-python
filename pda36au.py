@@ -7,6 +7,7 @@ import struct
 import threading
 from contextlib import suppress
 from dataclasses import dataclass
+from time import monotonic_ns
 
 import numpy as np
 import usb.core
@@ -93,6 +94,9 @@ class PDABlock:
     y_unit: str
 
     detector_channel: int = 0
+    received_ns: int | None = None
+    sample_period_s: float | None = None
+    y_resolution: float = 1.0
 
     @property
     def detector_raw(self) -> np.ndarray:
@@ -266,7 +270,7 @@ class PDA36AU:
         self._stream_error: Exception | None = None
         self._last_adc_status: bytes | None = None
 
-        self._block_queue: queue.Queue[bytes] = queue.Queue(
+        self._block_queue: queue.Queue[tuple[bytes, int]] = queue.Queue(
             maxsize=queue_size
         )
 
@@ -1038,6 +1042,8 @@ class PDA36AU:
             x_unit=x_unit,
             y_unit=y_unit,
             detector_channel=self.detector_channel,
+            sample_period_s=scale.sample_period_seconds if scale is not None else None,
+            y_resolution=abs(scale.y_conversion) if scale is not None and scale.y_valid else 1.0,
         )
 
     @staticmethod
@@ -1070,10 +1076,9 @@ class PDA36AU:
         If the application queue is full, discard the oldest
         display block and keep the newest one.
         """
+        frame = (raw, monotonic_ns())
         try:
-            self._block_queue.put_nowait(
-                raw
-            )
+            self._block_queue.put_nowait(frame)
 
         except queue.Full:
             try:
@@ -1081,9 +1086,7 @@ class PDA36AU:
             except queue.Empty:
                 pass
 
-            self._block_queue.put_nowait(
-                raw
-            )
+            self._block_queue.put_nowait(frame)
 
     def _data_reader(self) -> None:
         assert (
@@ -1353,10 +1356,11 @@ class PDA36AU:
                         self.set_trigger_slope(slope)
                 self._free_run_settings = None
 
-    def read_raw_block(
-        self,
-        timeout: float = 5.0,
-    ) -> bytes:
+    def read_raw_block(self, timeout: float = 5.0) -> bytes:
+        raw, _ = self._read_received_block(timeout)
+        return raw
+
+    def _read_received_block(self, timeout: float) -> tuple[bytes, int]:
 
         if self._stream_error is not None:
             raise RuntimeError(
@@ -1398,7 +1402,7 @@ class PDA36AU:
         """Read a block, restarting a stalled stream once by default. Use latest for display."""
         reader = self._stream_thread
         try:
-            raw = self.read_raw_block(timeout=timeout)
+            frame = self._read_received_block(timeout)
         except TimeoutError as exc:
             if not recover_on_timeout or timeout <= 0:
                 raise
@@ -1420,22 +1424,28 @@ class PDA36AU:
                     raise RuntimeError(f"{exc} PDA36AU-herstart mislukt: {restart_error}") from restart_error
 
             try:
-                raw = self.read_raw_block(timeout=timeout)
+                frame = self._read_received_block(timeout)
             except TimeoutError as retry_error:
                 raise TimeoutError(
                     f"{retry_error}. De PDA36AU-acquisitie is eenmaal opnieuw gestart."
                 ) from retry_error
 
-        return self.decode_block(self._latest_raw_block(raw) if latest else raw)
+        return self._decode_received_block(self._latest_received_block(frame) if latest else frame)
 
-    def _latest_raw_block(self, raw: bytes) -> bytes:
+    def _decode_received_block(self, frame: tuple[bytes, int]) -> PDABlock:
+        raw, received_ns = frame
+        block = self.decode_block(raw)
+        block.received_ns = received_ns
+        return block
+
+    def _latest_received_block(self, frame: tuple[bytes, int]) -> tuple[bytes, int]:
         # Limit the drain to the backlog already queued by the USB reader.
         for _ in range(self._block_queue.qsize()):
             try:
-                raw = self._block_queue.get_nowait()
+                frame = self._block_queue.get_nowait()
             except queue.Empty:
                 break
-        return raw
+        return frame
 
     def read_latest_block(
         self,
@@ -1459,18 +1469,18 @@ class PDA36AU:
 
         try:
             if timeout > 0:
-                raw = self._block_queue.get(
+                frame = self._block_queue.get(
                     timeout=timeout
                 )
             else:
-                raw = (
+                frame = (
                     self._block_queue.get_nowait()
                 )
 
         except queue.Empty:
             return None
 
-        return self.decode_block(self._latest_raw_block(raw))
+        return self._decode_received_block(self._latest_received_block(frame))
 
     def single_scan(
         self,

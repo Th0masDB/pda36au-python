@@ -1,9 +1,10 @@
 import sys
-import time
 import threading
 import csv
 import io
 from contextlib import suppress
+from functools import partial
+from math import isfinite
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
 
 from config import I2C_BUS, DAC_ADDRESS
+from gui.scan_timing import (
+    DEFAULT_TIMING_CODE, Acquisition, MeasurementStopped, benchmark, measure_usb, step_rows,
+)
 
 # ---------------------------------------------------------
 # Simulatie of echte hardware
@@ -48,6 +52,7 @@ else:
 punten = []
 scan_y_unit = None
 scan_settings = None
+timing = {"benchmark": [], "scan": []}
 scan_background = {"value": None, "sigma": None, "y_unit": "", "settings": None,
                    "status": "Geen achtergrondscan", "points": 0}
 
@@ -211,7 +216,7 @@ def _format_live_samples(values, x):
 def get_live_data():
     with lock:
         snapshot = {**live_block, "running": live_running, "scanning": running,
-                    "status": "Scannen (live PDA-data)" if running else live_status,
+                    "status": status if running else live_status,
                     "error": live_error,
                     "background": {key: background[key] for key in
                                    ("value", "sigma", "y_unit", "target", "status")}}
@@ -268,199 +273,133 @@ def set_manual_dac(value):
 
 
 # ---------------------------------------------------------
-# PDA meten
-# ---------------------------------------------------------
-
-def meet_gemiddelde(pda, aantal_blokken, update_scan_unit=True):
-    """Lees PDA-blokken en bereken het gemiddelde."""
-    total = 0.0
-    samples = 0
-
-    for _ in range(aantal_blokken):
-        if stop_event.is_set():
-            break
-
-        block = pda.read_block()
-        publish_live_block(block, update_scan_unit=update_scan_unit)
-        values = np.asarray(block.detector)
-        total += float(values.sum(dtype=np.float64))
-        samples += values.size
-
-    return total / samples if samples else float("nan")
-
-
-# ---------------------------------------------------------
 # Cavity scan
 # ---------------------------------------------------------
 
+def measure_timing(reference_code=DEFAULT_TIMING_CODE):
+    scan_cavity(timing_code=reference_code, timing_only=True)
+
+
 def scan_cavity(
     step=50,
-    delay=0.001,
+    delay=0,
     aantal_blokken=1,
     achtergrond=False,
+    *,
+    timing_code=DEFAULT_TIMING_CODE,
+    timing_only=False,
 ):
-    """Voer één volledige cavity scan uit."""
+    """Meet de DAC-feedback en voer daarna zo nodig de cavity-scan uit."""
 
-    global status
-    global running
-    global error
-    global scan_y_unit, scan_settings
+    global status, running, error, scan_y_unit, scan_settings
 
     settings = (int(step), float(delay), int(aantal_blokken))
-    if not 1 <= step <= 4095 or delay < 0 or not 1 <= aantal_blokken <= 100:
-        raise ValueError("Ongeldige scaninstellingen")
+    if (not 1 <= step <= 4095 or not isfinite(delay) or delay < 0
+            or not 1 <= aantal_blokken <= 100 or not 1 <= timing_code <= 4095):
+        raise ValueError("Ongeldige scan- of timinginstellingen.")
+    step, delay, aantal_blokken = settings
+    timing_code = int(timing_code)
     background_points = []
+    measurements = []
 
     # Laat een handmatige DAC-instelling voltooien voordat een scan start.
     with dac_lock, lock:
-
         if running or live_running:
             return
 
-        if not achtergrond:
-            punten.clear()
-            scan_y_unit = None
-            scan_settings = settings
-        else:
-            scan_background.update(status="Achtergrond scannen...", points=0)
-
-        status = "Achtergrond scannen..." if achtergrond else "Scannen..."
+        timing["benchmark"] = []
+        if not timing_only:
+            timing["scan"] = []
+            if achtergrond:
+                scan_background.update(status="Achtergrond scannen...", points=0)
+            else:
+                punten.clear()
+                scan_y_unit = None
+                scan_settings = settings
+        status = "Timing meten..."
+        stop_event.clear()
         running = True
         error = ""
 
-    stop_event.clear()
-
-    bus = None
-
     try:
-        # I2C-bus openen
-        bus = SMBus(I2C_BUS)
-
-        # PDA openen
-        with PDA36AU() as pda:
-
-            gain = pda.get_gain_db()
-
-            # Continuous mode één keer starten
-            pda.start_continuous()
-
+        if SIMULATIE and PDA_CONNECTED:
+            raise RuntimeError("Gebruik --sim voor een gesimuleerde scan. Voor een echte scan moet kanaal 2 het DAC-signaal meten.")
+        with SMBus() as bus:
+            bus.open(I2C_BUS)
+            write_dac = partial(set_dac, bus)
             try:
-                # DAC van 0 tot 4095
-                for dac_value in range(
-                    0,
-                    4096,
-                    step,
-                ):
-
-                    # Stopknop controleren
-                    if stop_event.is_set():
-
+                with PDA36AU() as pda:
+                    gain = pda.get_gain_db()
+                    usb_ms = measure_usb(pda, stop_event)
+                    write_dac(0)
+                    pda.start_continuous(free_run=True)
+                    try:
+                        capture = Acquisition(
+                            pda, write_dac, stop_event, partial(
+                                publish_live_block, update_scan_unit=not timing_only and not achtergrond))
+                        calibration, rows = benchmark(capture, timing_code, usb_ms)
                         with lock:
-                            status = "Scan gestopt"
-
-                        break
-
-                    # DAC instellen
-                    set_dac(
-                        bus,
-                        dac_value,
-                    )
-
-                    # Eventueel wachten
-                    if delay > 0:
-                        time.sleep(delay)
-
-                    # Detector meten
-                    gemiddelde = meet_gemiddelde(
-                        pda,
-                        aantal_blokken, update_scan_unit=not achtergrond,
-                    )
-
-                    # Meetpunt opslaan
-                    with lock:
-
-                        if achtergrond:
-                            background_points.append(gemiddelde)
-                            scan_background["points"] = len(background_points)
-                        else:
-                            punten.append([float(dac_value), gemiddelde])
-
+                            timing["benchmark"] = rows
+                            if not timing_only:
+                                status = "Achtergrond scannen..." if achtergrond else "Scannen..."
+                        if not timing_only:
+                            previous_code = timing_code
+                            feedback = calibration.zero + timing_code * calibration.per_code
+                            samples = aantal_blokken * calibration.block_size
+                            for code in range(0, 4096, step):
+                                target = feedback + (code - previous_code) * calibration.per_code
+                                point = capture.step(calibration, code, feedback, target, samples, delay)
+                                capture.check_stop()
+                                measurements.append(point)
+                                feedback, previous_code = point.feedback, code
+                                with lock:
+                                    if achtergrond:
+                                        background_points.append(point.detector)
+                                        scan_background["points"] = len(background_points)
+                                    else:
+                                        punten.append([float(code), point.detector, point.feedback])
+                    finally:
+                        pda.stop_continuous()
             except BaseException:
-                with suppress(Exception):
-                    set_dac(bus, 0)
+                with suppress(OSError):
+                    write_dac(0)
                 raise
+            else:
+                write_dac(0)
 
-            pda.stop_continuous()
-            set_dac(bus, 0)
-
-        # Alleen "klaar" melden wanneer
-        # de scan niet handmatig gestopt is
-        if not stop_event.is_set():
-
-            with lock:
-
+        with lock:
+            if stop_event.is_set():
+                raise MeasurementStopped
+            if timing_only:
+                status = "Timingtest klaar"
+            elif achtergrond:
+                values = np.asarray(background_points)
+                if values.size >= 2:
+                    scan_background.update(value=float(np.mean(values)),
+                                           sigma=float(np.std(values, ddof=1)),
+                                           y_unit=live_block["y_unit"], settings=settings,
+                                           status="Achtergrondscan klaar")
+                else:
+                    scan_background["status"] = "Achtergrondscan mislukt: minder dan twee geldige punten"
+                status = scan_background["status"]
+            else:
                 status = f"Scan klaar - gain {gain} dB"
-                if achtergrond:
-                    values = np.asarray(background_points)
-                    values = values[np.isfinite(values)]
-                    if values.size >= 2:
-                        scan_background.update(value=float(np.mean(values)),
-                                               sigma=float(np.std(values, ddof=1)),
-                                               y_unit=live_block["y_unit"], settings=settings,
-                                               status="Achtergrondscan klaar")
-                        status = "Achtergrondscan klaar"
-                    else:
-                        scan_background["status"] = "Achtergrondscan mislukt: minder dan twee geldige punten"
-                        status = scan_background["status"]
-
+    except MeasurementStopped:
+        with lock:
+            status = "Timingtest gestopt" if timing_only else "Scan gestopt"
     except Exception as exc:
-
         with lock:
-
-            error = (
-                f"{type(exc).__name__}: {exc}"
-            )
-
-            status = "Fout tijdens scan"
-
-        # Bij een fout proberen de DAC
-        # alsnog terug naar nul te zetten
-        if bus is not None:
-
-            try:
-                set_dac(
-                    bus,
-                    0,
-                )
-
-            except Exception:
-                pass
-
+            error = f"{type(exc).__name__}: {exc}"
+            status = "Fout tijdens timingtest" if timing_only else "Fout tijdens scan"
     finally:
-
-        # I2C-bus sluiten
-        if bus is not None:
-
-            close = getattr(
-                bus,
-                "close",
-                None,
-            )
-
-            if callable(close):
-
-                try:
-                    close()
-
-                except Exception:
-                    pass
-
+        scan_rows = step_rows(measurements) if measurements else []
         with lock:
+            if not timing_only:
+                timing["scan"] = scan_rows
             if achtergrond and (stop_event.is_set() or error):
                 scan_background["status"] = "Achtergrondscan afgebroken; vorige referentie behouden"
+            stop_event.clear()
             running = False
-
-        stop_event.clear()
 
 
 # ---------------------------------------------------------
@@ -495,11 +434,12 @@ def get_status():
             "y_unit": scan_y_unit,
             "background": dict(scan_background),
             "settings": scan_settings,
+            "timing": dict(timing),
             "background_compatible": scan_settings is None or scan_settings == scan_background["settings"],
         }
 
 
-def get_points():
+def get_points(*, include_feedback=False):
     """
     Geef alle meetpunten terug.
 
@@ -509,7 +449,7 @@ def get_points():
 
     with lock:
 
-        return list(punten)
+        return list(punten) if include_feedback else [point[:2] for point in punten]
 
 
 def export_scan_csv():
@@ -528,11 +468,11 @@ def export_scan_csv():
     output = io.StringIO(newline="")
     writer = csv.writer(output)
     writer.writerow(["dac_waarde", "detectorsignaal", "eenheid", "baseline",
-                     "sigma", "baseline_min_2sigma", "baseline_plus_2sigma"])
-    for dac, signal in rows:
+                     "sigma", "baseline_min_2sigma", "baseline_plus_2sigma", "dac_feedback"])
+    for dac, signal, feedback in rows:
         writer.writerow([dac, signal if np.isfinite(signal) else "", unit,
                          baseline if baseline is not None else "",
-                         sigma if sigma is not None else "", lower, upper])
+                         sigma if sigma is not None else "", lower, upper, feedback])
     return output.getvalue().encode("utf-8-sig")
 
 

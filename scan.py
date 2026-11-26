@@ -1,80 +1,56 @@
-import numpy as np
-import time
-import sys
-from contextlib import suppress
-import matplotlib.pyplot as plt
-from config import I2C_BUS, DAC_ADDRESS
+import argparse
 
-SIMULATIE = "--simulatie" in sys.argv or "--sim" in sys.argv
-PDA_Connected = "--PDACon" in sys.argv
-
-if SIMULATIE and PDA_Connected:
-    from simulation import SMBus, i2c_msg
-    from pda36au import PDA36AU
-if SIMULATIE:
-    from simulation import SMBus, i2c_msg, PDA36AU
-else:
-    from smbus2 import SMBus, i2c_msg
-    from pda36au import PDA36AU
+from gui import scan_controller
 
 
-bus = SMBus(I2C_BUS)
-STEP= 50
-DELAY = 0.001
-AANTAL_BLOKKEN = 1
-
-def meet_gemiddelde(pda, aantal_blokken=5):
-    total = 0.0
-    samples = 0
-
-    for _ in range(aantal_blokken):
-        values = np.asarray(pda.read_block().detector)
-        total += float(values.sum(dtype=np.float64))
-        samples += values.size
-
-    return total / samples if samples else float("nan")
-
-def set_dac(value):
-    value = max(0, min(4095, value))
-
-    byte1 = (value >> 8) & 0x0F
-    byte2 = value & 0xFF
-
-    msg = i2c_msg.write(DAC_ADDRESS, [byte1, byte2])
-    bus.i2c_rdwr(msg)
-
-def scan_cavity():
-    pda.start_continuous()
-    x = []
-    try:
-        for i in range(0, 4096, STEP):
-
-            set_dac(i)
-
-            if DELAY > 0:
-                time.sleep(DELAY)
-
-            gemiddelde = meet_gemiddelde(
-                pda,
-                aantal_blokken=AANTAL_BLOKKEN
-            )
-
-            x.append([i, gemiddelde])
-
-        pda.stop_continuous()
-    except BaseException:
-        with suppress(Exception):
-            set_dac(0)
-        raise
-
-    set_dac(0)
-
-    return np.array(x)
+def print_timings(title, rows):
+    if rows:
+        print(f"\n{title}")
+        print(f"{'Meting':<44} {'Mediaan':>10} {'Maximum':>10} {'Aantal':>6}")
+        for row in rows:
+            median = f"{row['mediaan']:.5g}" if row["mediaan"] is not None else "—"
+            maximum = f"{row['maximum']:.5g}" if row["maximum"] is not None else "—"
+            print(f"{row['meting']:<44} {median:>10} {maximum:>10} {row['n']:>6}")
 
 
-with PDA36AU() as pda:
-    print(pda.get_gain_db())
-    x = scan_cavity()
-    plt.plot(x[:,0], x[:,1])
-    plt.show()
-    # print(x[:,0])
+def main():
+    parser = argparse.ArgumentParser(description="Meet DAC-timing of voer een cavity-scan uit.")
+    parser.add_argument("--timing", action="store_true", help="Voer alleen de timingtest uit.")
+    parser.add_argument("--timing-code", type=int, default=scan_controller.DEFAULT_TIMING_CODE,
+                        help="Referentiecode voor de DAC-timingtest.")
+    parser.add_argument("--sim", "--simulatie", action="store_true")
+    parser.add_argument("--PDACon", action="store_true")
+    args = parser.parse_args()
+    if not 1 <= args.timing_code <= 4095:
+        parser.error("--timing-code moet tussen 1 en 4095 liggen.")
+
+    if args.timing:
+        scan_controller.measure_timing(args.timing_code)
+    else:
+        scan_controller.scan_cavity(timing_code=args.timing_code)
+
+    if scan_controller.SIMULATIE:
+        print("Simulatie")
+    status = scan_controller.get_status()
+    print(status["status"])
+    print_timings("Timingtest", status["timing"]["benchmark"])
+    print_timings("Scan", status["timing"]["scan"])
+    if status["error"]:
+        raise SystemExit(status["error"])
+
+    if not args.timing:
+        import matplotlib.pyplot as plt
+
+        codes, detector, feedback = zip(*scan_controller.get_points(include_feedback=True))
+        _, detector_axis = plt.subplots()
+        feedback_axis = detector_axis.twinx()
+        unit = status["y_unit"]
+        detector_axis.set(xlabel="DAC waarde", ylabel=f"Kanaal 1 (detector, {unit})")
+        feedback_axis.set(ylabel=f"Kanaal 2 (DAC, {unit})")
+        detector_axis.plot(codes, detector)
+        feedback_axis.plot(codes, feedback, color="tab:green")
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()

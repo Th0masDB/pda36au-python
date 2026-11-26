@@ -214,17 +214,22 @@ def metingen():
                 label="DAC stapgrootte", value=50, min=1, max=4095, step=1,
             ).classes("w-44")
             delay_input = ui.number(
-                label="Delay per stap (ms)", value=1, min=0, step=0.1,
-            ).classes("w-44")
+                label="Extra wachttijd na trigger (ms)", value=0, min=0, step=0.1,
+            ).classes("w-60")
             blocks_input = ui.number(
                 label="PDA blokken per punt", value=1, min=1, max=100, step=1,
             ).classes("w-44")
-            live_plot = ui.switch("Live grafiek", value=False)
+            live_plot = ui.switch("Live grafiek", value=True)
 
-        with ui.row().classes("gap-2"):
+        with ui.row().classes("gap-2 items-center"):
             start_button = ui.button("Start scan", icon="play_arrow")
             stop_button = ui.button("Stop", icon="stop")
             stop_button.disable()
+            timing_code_input = ui.number(
+                "Timingreferentie (DAC-code)", value=scan_controller.DEFAULT_TIMING_CODE,
+                min=1, max=4095, step=1,
+            ).classes("w-52")
+            timing_button = ui.button("Meet timing", icon="timer")
 
             def export_scan():
                 try:
@@ -256,7 +261,7 @@ def metingen():
             "tooltip": {"trigger": "axis"},
             "grid": {"left": 80, "right": 45, "top": 45, "bottom": 85,
                      "containLabel": True},
-            "legend": {"data": ["PDA36AU", "Baseline", "Baseline + 2σ", "Baseline − 2σ"]},
+            "legend": {"data": ["Kanaal 1 (detector)", "Kanaal 2 (DAC)", "Baseline", "Baseline + 2σ", "Baseline − 2σ"]},
             "xAxis": {
                 "type": "value", "name": "DAC waarde",
                 "nameLocation": "middle", "nameGap": 45, "min": 0, "max": 4095,
@@ -265,19 +270,52 @@ def metingen():
                               "hideOverlap": True},
                 "nameTextStyle": {"fontSize": 14, "color": "#374151"},
             },
-            "yAxis": {
+            "yAxis": [{
                 "type": "value", "name": "Detectorsignaal",
                 "nameLocation": "middle", "nameGap": 50, "scale": True,
-            },
+            }, {
+                "type": "value", "name": "DAC-feedback", "scale": True,
+                "splitLine": {"show": False},
+            }],
             "series": [{
-                "name": "PDA36AU", "type": "line", "showSymbol": False, "data": [],
+                "name": "Kanaal 1 (detector)", "type": "line", "showSymbol": False, "data": [],
             }, {
                 "name": "Baseline", "type": "line", "showSymbol": False,
                 "lineStyle": {"type": "dashed", "width": 2},
                 "itemStyle": {"color": "#d97706"}, "data": [],
-            }, *sigma_series()],
+            }, *sigma_series(), {
+                "name": "Kanaal 2 (DAC)", "type": "line", "yAxisIndex": 1, "showSymbol": False,
+                "itemStyle": {"color": "#0f766e"}, "data": [],
+            }],
         }).classes("w-full").style("height: 500px")
         grafiek_status = {"laatste_aantal": 0}
+        timing_columns = [
+            {"name": name, "field": name, "label": label, "align": align}
+            for name, label, align in (("meting", "Meting", "left"), ("mediaan", "Mediaan", "right"),
+                                       ("maximum", "Maximum", "right"), ("n", "Aantal", "right"))
+        ]
+        timing_tables = {}
+        with ui.expansion("Timingresultaten", icon="timer", value=True).classes("w-full"):
+            ui.label("De timingtest gebruikt kanaal 2. De hosttijd omvat de I²C-write, PDA-opname en USB-overdracht.")
+            if scan_controller.SIMULATIE:
+                ui.label("Simulatie").classes("font-medium")
+            for key, title in (("benchmark", "Timingtest"), ("scan", "Laatste scan")):
+                timing_tables[key] = ui.table(
+                    columns=timing_columns, rows=[], row_key="meting", title=title,
+                ).props("flat dense").classes("w-full")
+
+        def update_scan_series(rows):
+            chart.options["series"][0]["data"] = [[code, detector] for code, detector, _ in rows]
+            chart.options["series"][-1]["data"] = [[code, feedback] for code, _, feedback in rows]
+            grafiek_status["laatste_aantal"] = len(rows)
+
+        def update_timing_tables(timing):
+            for key, table in timing_tables.items():
+                rows = [{**row, **{field: f"{row[field]:.5g}" if row[field] is not None else "—"
+                                   for field in ("mediaan", "maximum")}}
+                        for row in timing[key]]
+                if table.rows != rows:
+                    table.update_rows(rows)
 
         def update_scan_baseline(data):
             background = data["background"]
@@ -293,11 +331,12 @@ def metingen():
             changed = changed or sigma_changed
             display_unit = unit if unit is not None else background["y_unit"]
             axis_name = f"Detectorsignaal ({display_unit})" if display_unit else "Detectorsignaal"
-            changed = changed or chart.options["yAxis"]["name"] != axis_name
-            chart.options["yAxis"]["name"] = axis_name
+            changed = changed or chart.options["yAxis"][0]["name"] != axis_name
+            chart.options["yAxis"][0]["name"] = axis_name
+            chart.options["yAxis"][1]["name"] = f"DAC-feedback ({unit})" if unit else "DAC-feedback"
             return changed
 
-        async def start_scan(achtergrond=False):
+        async def start_scan(achtergrond=False, timing_only=False):
             huidige_status = scan_controller.get_status()
             if huidige_status["running"]:
                 return
@@ -308,31 +347,31 @@ def metingen():
             step = max(1, min(4095, int(step_input.value or 50)))
             delay = max(0.0, float(delay_input.value or 0) / 1000.0)
             aantal_blokken = max(1, int(blocks_input.value or 1))
+            timing_code = int(timing_code_input.value or scan_controller.DEFAULT_TIMING_CODE)
 
-            if not achtergrond:
-                chart.options["series"][0]["data"] = []
-            update_scan_baseline(scan_controller.get_status())
-            chart.update()
-            grafiek_status["laatste_aantal"] = 0
+            if not achtergrond and not timing_only:
+                update_scan_series([])
+                chart.update()
             start_button.disable()
+            timing_button.disable()
+            background_scan_button.disable()
             stop_button.enable()
-            status_label.set_text("Status: Scannen...")
+            status_label.set_text("Status: Timing meten...")
             error_label.set_text("")
 
             try:
                 # Hardware uitlezen in een thread houdt de GUI beschikbaar.
-                await run.io_bound(
-                    scan_controller.scan_cavity, step, delay, aantal_blokken, achtergrond,
-                )
+                if timing_only:
+                    await run.io_bound(scan_controller.measure_timing, timing_code)
+                else:
+                    await run.io_bound(
+                        scan_controller.scan_cavity, step, delay, aantal_blokken, achtergrond, timing_code=timing_code,
+                    )
             finally:
-                # Na afloop altijd de volledige grafiek tonen.
-                punten = scan_controller.get_points()
-                chart.options["series"][0]["data"] = punten
-                update_scan_baseline(scan_controller.get_status())
-                chart.update()
-                grafiek_status["laatste_aantal"] = len(punten)
-                start_button.enable()
-                stop_button.disable()
+                if not chart.is_deleted:
+                    update_scan_series(scan_controller.get_points(include_feedback=True))
+                    update_gui()
+                    chart.update()
 
         def stop_scan():
             scan_controller.stop_scan()
@@ -340,6 +379,7 @@ def metingen():
             stop_button.disable()
 
         start_button.on("click", lambda: start_scan())
+        timing_button.on("click", lambda: start_scan(timing_only=True))
         background_scan_button.on("click", lambda: start_scan(achtergrond=True))
         stop_button.on("click", stop_scan)
 
@@ -350,6 +390,8 @@ def metingen():
             export_button.set_enabled(data["aantal_punten"] > 0)
             busy = data["running"] or data["live_running"]
             start_button.set_enabled(not busy)
+            timing_button.set_enabled(not busy)
+            timing_code_input.set_enabled(not busy)
             background_scan_button.set_enabled(not busy)
             stop_button.set_enabled(data["running"])
             clear_scan_background_button.set_enabled(not busy and data["background"]["value"] is not None)
@@ -363,19 +405,18 @@ def metingen():
                     text += " — Instellingen gewijzigd: meet opnieuw de achtergrond vóór de volgende scan."
             scan_background_label.set_text(text)
             error_label.set_text(data["error"])
+            update_timing_tables(data["timing"])
 
             chart_changed = update_scan_baseline(data)
-            if (live_plot.value and data["running"]
+            if ((live_plot.value or not data["running"])
                     and data["aantal_punten"] != grafiek_status["laatste_aantal"]):
-                punten = scan_controller.get_points()
-                chart.options["series"][0]["data"] = punten
-                grafiek_status["laatste_aantal"] = len(punten)
+                update_scan_series(scan_controller.get_points(include_feedback=True))
                 chart_changed = True
             if chart_changed:
                 chart.update()
 
         update_gui()
-        ui.timer(0.5, update_gui)
+        ui.timer(0.2, update_gui)
 
 
 @ui.page("/grafieken")

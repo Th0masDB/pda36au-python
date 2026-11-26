@@ -111,7 +111,7 @@ Met een echte PDA. Sluit voor scans ook de DAC aan.
 python gui/main.py
 ```
 
-Met een echte PDA en een gesimuleerde DAC:
+Voor live uitlezen met een echte PDA en een gesimuleerde DAC:
 
 ```bash
 python gui/main.py --sim --PDACon
@@ -122,18 +122,42 @@ Open na het starten [http://localhost:8080](http://localhost:8080).
 
 ### Cavity scannen
 
-Ga naar **Scan**, stel de meetparameters in en klik op **Start scan**:
+Sluit de DAC-uitgang aan op PDA-kanaal 2. Ga naar **Scan** en klik op
+**Meet timing** om de verbinding en doorvoer op de Raspberry Pi te meten.
+De test schakelt tussen nul en de gekozen **Timingreferentie (DAC-code)**,
+standaard 1024, en zet de uitgang na afloop terug op nul.
+
+Onder **Timingresultaten** staan de I²C-schrijftijd, de USB-statusroundtrip,
+de PDA-sampleperiode, de ontvangen samples per seconde en de tijd per meetpunt.
+De tijd van DAC-write tot bevestiging op de host omvat ook de PDA-opname en
+USB-overdracht. De 10–90%-flanktijd is meetbaar tot op één PDA-sample als beide
+drempels op kanaal 2 in hetzelfde blok zijn vastgelegd.
+De kolom **Aantal** toont hoeveel metingen aan elke regel hebben bijgedragen.
+
+Dezelfde timingtest kan op een Pi zonder browser worden gestart.
+
+```bash
+python scan.py --timing
+```
+
+Stel de meetparameters in en klik op **Start scan**. De scan voert eerst de
+timingtest uit. Per DAC-stap moeten drie opeenvolgende samples op kanaal 2 de
+nieuwe stand bevestigen. Kanaal 1 wordt gemiddeld over de daaropvolgende samples
+zolang het DAC-signaal binnen de gemeten band valt. Bij een ontbrekend signaal
+of een onbruikbaar kleine DAC-stap stopt de scan met een melding.
 
 | Instelling | Betekenis | Standaard |
 | --- | --- | --- |
 | DAC stapgrootte | Stap tussen opeenvolgende DAC-waarden binnen 0–4095 | 50 |
-| Delay per stap (ms) | Wachttijd na het instellen van de DAC | 1 ms |
-| PDA blokken per punt | Aantal meetblokken waarvan het detectorsignaal wordt gemiddeld | 1 |
-| Live grafiek | Scangrafiek tijdens de meting bijwerken, maximaal twee keer per seconde | Uit |
+| Extra wachttijd na trigger (ms) | Extra wachttijd gerekend vanaf het bevestigde DAC-niveau | 0 ms |
+| PDA blokken per punt | Aantal blokequivalenten aan geldige samples na de trigger | 1 |
+| Live grafiek | Beide PDA-kanalen tijdens de meting tonen, maximaal vijf keer per seconde | Aan |
 
 Met **Stop** vraag je de scan te stoppen. Na afloop verschijnt de volledige
-scangrafiek, ook als **Live grafiek** uit stond. De controller probeert de DAC
-na afloop, bij stoppen en bij een fout terug op nul te zetten.
+scangrafiek. **Grafieken** toont het PDA-meetblok waarin het DAC-niveau is
+bevestigd. De controller probeert de DAC na afloop, bij stoppen en bij een
+fout terug op nul te zetten. Gebruik `--sim` om deze functies met twee
+gesimuleerde PDA-kanalen uit te proberen.
 
 ### Live PDA-signaal
 
@@ -338,6 +362,7 @@ with PDA36AU() as detector:
 | `gui/main.py` | NiceGUI-pagina's voor Home, Scan, Grafieken en Raspberry Pi-beheer |
 | `gui/pi_control.py` | Raspberry Pi-detectie en systeemshutdown |
 | `gui/scan_controller.py` | Scanlogica, live acquisitie en gedeelde meetstatus |
+| `gui/scan_timing.py` | Timings meten en detectorsamples selecteren op basis van kanaal 2 |
 | `pda36au.py` | USB-driver voor de PDA36AU |
 | `simulation.py` | Gesimuleerde DAC en PDA met een cavity-resonantie en ruis |
 | `pda-tool.py` | Commandlinetool voor apparaatinformatie en acquisitie |
