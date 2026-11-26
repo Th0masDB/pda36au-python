@@ -340,9 +340,13 @@ def scan_cavity(
                         calibration, rows = benchmark(capture, timing_code, usb_ms)
                         with lock:
                             timing["benchmark"] = rows
-                            if not timing_only:
-                                status = "Achtergrond scannen..." if achtergrond else "Scannen..."
                         if not timing_only:
+                            minimum_step = calibration.minimum_step
+                            if step < minimum_step:
+                                raise ValueError(f"De gemeten ruis op kanaal 2 vereist een DAC-stap van minstens "
+                                                 f"{minimum_step} codes. Ingesteld: {step}.")
+                            with lock:
+                                status = "Achtergrond scannen..." if achtergrond else "Scannen..."
                             previous_code = timing_code
                             feedback = calibration.zero + timing_code * calibration.per_code
                             samples = aantal_blokken * calibration.block_size

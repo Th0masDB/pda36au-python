@@ -1,13 +1,15 @@
 """Meet DAC-feedback en verwerk gesynchroniseerde PDA-samples."""
 
+from collections import deque
 from dataclasses import dataclass
-from math import ceil
+from math import ceil, floor
 from time import monotonic_ns
 
 import numpy as np
 
 
 DEFAULT_TIMING_CODE = 1024
+FEEDBACK_WINDOW_SAMPLES = 16
 # Foutgrens bij uitblijven van data of feedback. Dit is geen meetvertraging.
 TIMEOUT_NS = 5_000_000_000
 
@@ -23,6 +25,12 @@ class Calibration:
     margin: float
     sample_period_s: float | None
     block_size: int
+    window_samples: int = 1
+    sample_margin: float = 0.0
+
+    @property
+    def minimum_step(self):
+        return floor(2 * self.margin / abs(self.per_code)) + 1
 
 
 @dataclass(frozen=True)
@@ -72,6 +80,8 @@ class Acquisition:
         margin = max(calibration.margin, min(0.1 * change, 2 * abs(calibration.per_code)))
         if change and change <= 2 * margin:
             raise ValueError("De DAC-stap is te klein voor de gemeten ruis op kanaal 2.")
+        window = calibration.window_samples
+        sample_margin = max(margin, calibration.sample_margin)
 
         self.check_stop()
         start_ns = monotonic_ns()
@@ -91,28 +101,32 @@ class Acquisition:
                           else "Te weinig geldige PDA-samples na de trigger")
                 raise TimeoutError(f"{detail} bij DAC-waarde {code}.") from exc
             feedback = np.asarray(block.analog)
-            in_band = np.abs(feedback - target) <= margin
+            in_band = np.abs(_window_means(feedback, window) - target) <= margin
             start = 0
             if trigger_ns is None:
-                if change and period and edge_us is None:
-                    edge_us = edge_duration_us(feedback, previous, target, period)
-                # Drie opeenvolgende samples binnen de band bevestigen het niveau.
+                # Drie volledige meetvensters binnen de band bevestigen het niveau.
                 confirmed = np.flatnonzero(in_band[:-2] & in_band[1:-1] & in_band[2:])
                 if not confirmed.size:
                     continue
                 trigger_ns = block.received_ns
                 queue_ms = (consumed_ns - trigger_ns) / 1e6
                 self.show_block(block)
-                start = int(confirmed[0]) + 3
+                start = (int(confirmed[0]) + 3) * window
+                if period and change > 2 * sample_margin:
+                    edge_us = edge_duration_us(feedback[:start], previous, target, period)
                 deadline_ns = monotonic_ns() + TIMEOUT_NS
 
             skipped = min(skip, feedback.size - start)
             start += skipped
             skip -= skipped
-            detector = np.asarray(block.detector)[start:]
-            accepted = np.flatnonzero(in_band[start:] & np.isfinite(detector))[:samples - count]
+            end = in_band.size * window
+            detector = np.asarray(block.detector)[start:end]
+            feedback_samples = feedback[start:end]
+            valid = (np.repeat(in_band, window)[start:] & np.isfinite(detector)
+                     & (np.abs(feedback_samples - target) <= sample_margin))
+            accepted = np.flatnonzero(valid)[:samples - count]
             detector_sum += float(detector[accepted].sum())
-            feedback_sum += float(feedback[start:][accepted].sum())
+            feedback_sum += float(feedback_samples[accepted].sum())
             count += accepted.size
             if skipped or accepted.size:
                 deadline_ns = monotonic_ns() + TIMEOUT_NS
@@ -136,15 +150,27 @@ def edge_duration_us(feedback, previous, target, period_s):
     return None
 
 
-def _level(block):
-    values = np.asarray(block.analog)
+def _window_means(values, window):
+    size = values.size // window * window
+    return values[:size].reshape(-1, window).mean(axis=1)
+
+
+def _level(values, resolution):
     values = values[np.isfinite(values)]
     if values.size < 3:
         raise RuntimeError("Te weinig geldige samples op PDA-kanaal 2.")
     level = float(np.median(values))
     noise = float(np.quantile(np.abs(values - level), 0.99))
-    margin = max(3 * noise, block.y_resolution, np.spacing(max(1.0, abs(level))))
+    margin = max(3 * noise, resolution, np.spacing(max(1.0, abs(level))))
     return level, margin
+
+
+def _plateau(blocks, window):
+    feedback = [np.asarray(block.analog) for block in blocks]
+    resolution = blocks[-1].y_resolution
+    _, sample_margin = _level(np.concatenate(feedback), resolution)
+    level, margin = _level(np.concatenate([_window_means(values, window) for values in feedback]), resolution)
+    return level, margin, sample_margin
 
 
 def measure_usb(pda, stop_event):
@@ -163,13 +189,16 @@ def benchmark(acquisition, reference_code, usb_ms):
     start_ns = monotonic_ns()
     receipts = []
     samples = 0
+    zero_blocks = deque(maxlen=4)
     for index in range(32):
         block, _ = acquisition.read(monotonic_ns() + TIMEOUT_NS, since_ns=start_ns)
         receipts.append(block.received_ns)
+        zero_blocks.append(block)
         if index:
             samples += len(block.analog)
 
-    zero, margin = _level(block)
+    window = max(1, min(FEEDBACK_WINDOW_SAMPLES, len(block.analog) // 3))
+    zero, margin, sample_margin = _plateau(zero_blocks, window)
     acquisition.show_block(block)
     period = block.sample_period_s
     if period is not None and period <= 0:
@@ -186,16 +215,18 @@ def benchmark(acquisition, reference_code, usb_ms):
             high_block, _ = acquisition.read(deadline_ns, since_ns=begin_ns)
         except TimeoutError as exc:
             raise TimeoutError("Geen stabiele DAC-verandering op kanaal 2. Controleer de aansluiting.") from exc
-        high, high_margin = _level(high_block)
-        if abs(high - zero) <= 4 * max(margin, high_margin):
+        high, noise = _level(np.asarray(high_block.analog), high_block.y_resolution)
+        if abs(high - zero) <= 4 * max(sample_margin, noise):
             candidate = None
             continue
-        if candidate is not None and abs(high - candidate) <= max(margin, high_margin):
+        if candidate is not None and abs(high - candidate[0]) <= max(sample_margin, noise):
             break
-        candidate = high
+        candidate = (high, high_block)
 
+    high, high_margin, high_sample_margin = _plateau((candidate[1], high_block), window)
     calibration = Calibration(zero, (high - zero) / reference_code,
-                              max(margin, high_margin), period, len(block.analog))
+                              max(margin, high_margin), period, len(block.analog),
+                              window, max(sample_margin, high_sample_margin))
     transitions = []
     for code in (0, reference_code) * 4:
         previous, target = (zero, high) if code else (high, zero)
@@ -208,7 +239,9 @@ def benchmark(acquisition, reference_code, usb_ms):
         _row("PDA ADC-sampleperiode (µs)", [period * 1e6] if period else []),
         _row("PDA blokinterval op de host (ms)", intervals),
         _row("PDA ontvangen samples/s per kanaal", [samples / seconds] if seconds > 0 else []),
-        _row("Kanaal 2 meetmarge (DAC-codes)", [calibration.margin / abs(calibration.per_code)]),
+        _row("Kanaal 2 meetmarge per sample (DAC-codes)", [calibration.sample_margin / abs(calibration.per_code)]),
+        _row("Kanaal 2 meetmarge per venster (DAC-codes)", [calibration.margin / abs(calibration.per_code)]),
+        _row("Minimale DAC-stap (codes)", [calibration.minimum_step]),
         *step_rows(transitions),
     ]
     return calibration, rows

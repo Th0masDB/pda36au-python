@@ -6,7 +6,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from gui.scan_timing import Acquisition, Calibration
+import simulation
+from gui.scan_timing import Acquisition, Calibration, benchmark
 
 
 class FakePDA:
@@ -20,6 +21,18 @@ class FakePDA:
         analog, detector, receipt = frame
         return SimpleNamespace(analog=np.array(analog), detector=np.array(detector),
                                received_ns=receipt or monotonic_ns())
+
+
+class NoisyPDA(simulation.PDA36AU):
+    def __init__(self, noise_samples):
+        self.noise_samples = noise_samples
+
+    def read_block(self, **kwargs):
+        block = super().read_block(**kwargs)
+        pattern = np.repeat([-9.013, 9.013], self.noise_samples) * (3.3 / 4095)
+        noise = np.tile(pattern, block.analog.size // pattern.size)
+        block.analog[:noise.size] += noise
+        return block
 
 
 class FeedbackTests(unittest.TestCase):
@@ -58,6 +71,36 @@ class FeedbackTests(unittest.TestCase):
             with self.assertRaisesRegex(TimeoutError, "Kanaal 2.*DAC-waarde 10"):
                 acquisition.step(self.calibration, 10, 0, 10)
         self.assertEqual(self.blocks, [])
+
+    def test_noisy_feedback_filters_early_hits_and_excludes_outliers(self):
+        good_window = [41, 59, 41, 59]
+        early_hits = [50, 50, 50, 0]
+        acquisition = self.acquisition(
+            (early_hits * 4, [100] * 16, None),
+            ([0] * 4 + good_window * 3 + [40, 40, 40, 80] + early_hits + good_window,
+             [100] * 16 + [2, 4, 6, 100] + [100] * 4 + [8] * 4, None),
+        )
+        calibration = Calibration(0.0, 1.0, 2.0, 1e-6, 16, window_samples=4, sample_margin=27.039)
+        result = acquisition.step(calibration, 50, 0, 50, samples=4)
+        self.assertEqual(result.detector, 5)
+        self.assertIsNone(result.edge_us)
+        self.assertEqual(len(self.blocks[0].analog), 28)
+
+    def test_benchmark_distinguishes_short_and_correlated_noise(self):
+        for noise_samples, minimum_step in ((1, 1), (16, 55)):
+            with self.subTest(noise_samples=noise_samples), patch.object(simulation, "dac_value", 0):
+                pda = NoisyPDA(noise_samples)
+                pda.start_continuous()
+                acquisition = Acquisition(pda, lambda code: setattr(simulation, "dac_value", code),
+                                          threading.Event(), self.blocks.append)
+                calibration, _ = benchmark(acquisition, 1024, [])
+                self.assertAlmostEqual(calibration.sample_margin / abs(calibration.per_code), 27.039)
+                self.assertEqual(calibration.minimum_step, minimum_step)
+                if minimum_step <= 50:
+                    acquisition.step(calibration, 0, 1024 * calibration.per_code, calibration.zero)
+                    point = acquisition.step(calibration, 50, calibration.zero,
+                                             calibration.zero + 50 * calibration.per_code, samples=2500)
+                    self.assertAlmostEqual(point.feedback / calibration.per_code, 50)
 
 
 if __name__ == "__main__":

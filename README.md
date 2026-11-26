@@ -130,8 +130,8 @@ standaard 1024, en zet de uitgang na afloop terug op nul.
 Onder **Timingresultaten** staan de I²C-schrijftijd, de USB-statusroundtrip,
 de PDA-sampleperiode, de ontvangen samples per seconde en de tijd per meetpunt.
 De tijd van DAC-write tot bevestiging op de host omvat ook de PDA-opname en
-USB-overdracht. De 10–90%-flanktijd is meetbaar tot op één PDA-sample als beide
-drempels op kanaal 2 in hetzelfde blok zijn vastgelegd.
+USB-overdracht. De 10–90%-flanktijd is meetbaar tot op één PDA-sample als de
+flank boven de ruis uitkomt en beide drempels in het bevestigde blok vallen.
 De kolom **Aantal** toont hoeveel metingen aan elke regel hebben bijgedragen.
 
 Dezelfde timingtest kan op een Pi zonder browser worden gestart.
@@ -141,10 +141,14 @@ python scan.py --timing
 ```
 
 Stel de meetparameters in en klik op **Start scan**. De scan voert eerst de
-timingtest uit. Per DAC-stap moeten drie opeenvolgende samples op kanaal 2 de
-nieuwe stand bevestigen. Kanaal 1 wordt gemiddeld over de daaropvolgende samples
-zolang het DAC-signaal binnen de gemeten band valt. Bij een ontbrekend signaal
-of een onbruikbaar kleine DAC-stap stopt de scan met een melding.
+timingtest uit. Die meet de ruis op losse samples en op gemiddelden over 16
+opeenvolgende samples. **Minimale DAC-stap** is de kleinste stap waarbij de
+gemeten banden voor de oude en nieuwe stand elkaar niet overlappen.
+
+Per DAC-stap bevestigen drie opeenvolgende meetvensters op kanaal 2 de nieuwe
+stand. Kanaal 1 wordt gemiddeld over de daaropvolgende samples waarvan zowel het
+DAC-venster als de losse DAC-sample binnen hun meetband vallen. Bij een te
+kleine stap toont de scan de gemeten ondergrens vóór het eerste meetpunt.
 
 | Instelling | Betekenis | Standaard |
 | --- | --- | --- |
