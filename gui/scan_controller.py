@@ -56,12 +56,14 @@ running = False
 error = ""
 
 lock = threading.Lock()
+dac_lock = threading.Lock()
 stop_event = threading.Event()
 live_stop_event = threading.Event()
 live_running = False
 live_status = "Gereed"
 live_error = ""
-live_block = {"block": None, "data": [], "x_unit": "sample", "y_unit": "", "sequence": 0}
+live_block = {"block": None, "data": [], "analog_data": [],
+              "x_unit": "sample", "y_unit": "", "sequence": 0}
 background = {"value": None, "sigma": None, "y_unit": "", "target": 0, "blocks": 0,
               "sum": 0.0, "samples": 0, "status": "Geen achtergrondmeting"}
 
@@ -102,7 +104,8 @@ def publish_live_block(block, *, update_scan_unit=False):
 
     unit = getattr(block, "y_unit", "gesimuleerd")
     with lock:
-        live_block.update(block=block, data=None, x_unit=getattr(block, "x_unit", "sample"),
+        live_block.update(block=block, data=None, analog_data=None,
+                          x_unit=getattr(block, "x_unit", "sample"),
                           y_unit=unit,
                           sequence=live_block["sequence"] + 1)
         if update_scan_unit:
@@ -157,18 +160,24 @@ def _read_live(background_only=False):
     global live_running, live_status, live_error
     try:
         with PDA36AU() as pda:
-            pda.start_continuous()
-            with lock:
-                live_status = "Achtergrond meten" if background_only else "Live meten"
-            while not live_stop_event.is_set():
-                if background_only:
+            pda.start_continuous(free_run=True)
+            try:
+                with lock:
+                    live_status = "Achtergrond meten" if background_only else "Live meten"
+                while not live_stop_event.is_set():
                     with lock:
-                        if not background["target"]:
+                        measuring_background = bool(background["target"])
+                        if background_only and not measuring_background:
                             live_stop_event.set()
                             break
-                publish_live_block(pda.read_block())
-                live_stop_event.wait(0.05)
-            pda.stop_continuous()
+                    block = pda.read_block(timeout=1.0, latest=not measuring_background)
+                    if live_stop_event.is_set():
+                        break
+                    publish_live_block(block)
+                    if not measuring_background:
+                        live_stop_event.wait(0.05)
+            finally:
+                pda.stop_continuous()
         with lock:
             live_status = "Gestopt"
     except Exception as exc:
@@ -186,9 +195,8 @@ def stop_live():
     live_stop_event.set()
 
 
-def _format_live_samples(block):
-    values = np.asarray(block.detector)
-    x = getattr(block, "x", None)
+def _format_live_samples(values, x):
+    values = np.asarray(values)
     if x is None:
         x = np.arange(len(values), dtype=float)
 
@@ -210,10 +218,13 @@ def get_live_data():
 
     block = snapshot.pop("block")
     if snapshot["data"] is None:
-        snapshot["data"] = _format_live_samples(block)
+        x = getattr(block, "x", None)
+        samples = {"data": _format_live_samples(block.detector, x),
+                   "analog_data": _format_live_samples(block.analog, x)}
+        snapshot.update(samples)
         with lock:
             if live_block["sequence"] == snapshot["sequence"]:
-                live_block["data"] = snapshot["data"]
+                live_block.update(samples)
     return snapshot
 
 
@@ -235,6 +246,25 @@ def set_dac(bus, value):
     )
 
     bus.i2c_rdwr(msg)
+
+
+def set_manual_dac(value):
+    """Schrijf een DAC-waarde buiten een scan, ook tijdens live uitlezen."""
+    if not isinstance(value, (int, float)) or not 0 <= value <= 4095 or value != int(value):
+        raise ValueError("Voer een gehele DAC-waarde van 0 tot 4095 in.")
+    code = int(value)
+
+    with dac_lock:
+        with lock:
+            if running:
+                raise RuntimeError("Stop eerst de scan om de DAC handmatig in te stellen.")
+        try:
+            with SMBus() as bus:
+                bus.open(I2C_BUS)
+                set_dac(bus, code)
+        except OSError as exc:
+            raise RuntimeError("DAC niet bereikbaar. Controleer de I²C-bus en aansluiting.") from exc
+    return code
 
 
 # ---------------------------------------------------------
@@ -281,8 +311,8 @@ def scan_cavity(
         raise ValueError("Ongeldige scaninstellingen")
     background_points = []
 
-    # Voorkom dat twee scans tegelijk starten
-    with lock:
+    # Laat een handmatige DAC-instelling voltooien voordat een scan start.
+    with dac_lock, lock:
 
         if running or live_running:
             return

@@ -25,7 +25,7 @@ def update_sigma_lines(chart, background, baseline):
 
 def run_when_idle(action, *args):
     # Voorkom dat een andere browser tijdens de actie een meting start.
-    with scan_controller.lock:
+    with scan_controller.dac_lock, scan_controller.lock:
         if scan_controller.running or scan_controller.live_running:
             raise RuntimeError("Stop eerst de scan en de live PDA-meting.")
         return action(*args)
@@ -385,13 +385,38 @@ def grafieken():
 
     with ui.column().classes("p-6 w-full gap-4"):
         ui.label("Live PDA-signaal").classes("text-3xl font-bold")
-        ui.label("Het nieuwste meetblok van de detector. Tijdens een scan verschijnt hier automatisch de PDA-data.")
+        ui.label("Het nieuwste PDA-meetblok. Kanaal 1 toont de detector en kanaal 2 de DAC-uitgang voor timingmetingen.")
         ui.label("De meting blijft actief bij navigeren. Stop de live meting voordat je een scan start.")
         with ui.row().classes("gap-2"):
             start_button = ui.button("Start live meting", icon="play_arrow",
                                      on_click=scan_controller.start_live)
             stop_button = ui.button("Stop live meting", icon="stop",
                                     on_click=scan_controller.stop_live)
+        with ui.row().classes("gap-2 items-center"):
+            dac_input = ui.number("DAC-waarde (0–4095)", value=0, step=1).classes("w-48")
+            dac_button = ui.button("Stel DAC in", icon="tune")
+            dac_status = ui.label("")
+        setting_dac = False
+
+        async def apply_dac():
+            nonlocal setting_dac
+            if setting_dac:
+                return
+            setting_dac = True
+            dac_button.disable()
+            dac_status.set_text("DAC instellen…")
+            try:
+                value = await run.io_bound(scan_controller.set_manual_dac, dac_input.value)
+            except (RuntimeError, ValueError) as exc:
+                dac_status.set_text(str(exc))
+            else:
+                if value is not None:
+                    name = "Gesimuleerde DAC" if scan_controller.SIMULATIE else "DAC"
+                    dac_status.set_text(f"{name} ingesteld op {value}.")
+            finally:
+                setting_dac = False
+
+        dac_button.on("click", apply_dac)
         with ui.expansion("Achtergrondmeting", icon="settings", value=False).classes("w-full"):
             ui.label("Blokkeer de detector en klik op Meet achtergrond. "
                      "De meting stopt automatisch als er geen live meting actief was. "
@@ -417,12 +442,14 @@ def grafieken():
             background_label = ui.label("Geen achtergrondmeting")
         status_label = ui.label("Gereed")
         error_label = ui.label("").classes("text-red-600")
+        detector_name = "Kanaal 1 (detector)"
+        dac_name = "Kanaal 2 (DAC)"
         chart = ui.echart({
             "animation": False,
             "tooltip": {"trigger": "axis"},
             "grid": {"left": 85, "right": 45, "top": 45, "bottom": 85,
                      "containLabel": True},
-            "legend": {"data": ["PDA36AU", "Baseline", "Baseline + 2σ", "Baseline − 2σ"]},
+            "legend": {"data": [detector_name, dac_name, "Baseline", "Baseline + 2σ", "Baseline − 2σ"]},
             "xAxis": {
                 "type": "value", "name": "Sample", "nameLocation": "middle", "nameGap": 45,
                 "splitNumber": 5,
@@ -430,13 +457,15 @@ def grafieken():
                               "hideOverlap": True},
                 "nameTextStyle": {"fontSize": 14, "color": "#374151"},
             },
-            "yAxis": {"type": "value", "name": "Detectorsignaal", "scale": True},
+            "yAxis": {"type": "value", "name": "Signaal", "scale": True},
             "series": [
-                {"name": "PDA36AU", "type": "line", "showSymbol": False, "data": []},
+                {"name": detector_name, "type": "line", "showSymbol": False, "data": []},
                 {"name": "Baseline", "type": "line", "showSymbol": False,
                  "lineStyle": {"type": "dashed", "width": 2},
                  "itemStyle": {"color": "#d97706"}, "data": []},
                 *sigma_series(),
+                {"name": dac_name, "type": "line", "showSymbol": False,
+                 "itemStyle": {"color": "#0f766e"}, "data": []},
             ],
         }).classes("w-full").style("height: 500px")
         last_sequence = -1
@@ -449,6 +478,8 @@ def grafieken():
             error_label.set_text(data["error"])
             start_button.set_enabled(not (data["running"] or data["scanning"]))
             stop_button.set_enabled(data["running"])
+            dac_input.set_enabled(not data["scanning"])
+            dac_button.set_enabled(not data["scanning"] and not setting_dac)
             background = data["background"]
             background_label.set_text(background["status"] + (
                 f' — baseline: {background["value"]:.6g} {background["y_unit"]}'
@@ -463,13 +494,14 @@ def grafieken():
             last_sequence = data["sequence"]
             last_background = baseline
             chart.options["series"][0]["data"] = data["data"]
+            chart.options["series"][-1]["data"] = data["analog_data"]
             chart.options["series"][1]["data"] = (
                 [[data["data"][0][0], baseline[0]], [data["data"][-1][0], baseline[0]]]
                 if data["data"] and baseline[0] is not None and baseline[1] == data["y_unit"]
                 else [])
             update_sigma_lines(chart, background, chart.options["series"][1]["data"])
             chart.options["xAxis"]["name"] = f'Tijd / positie ({data["x_unit"]})'
-            chart.options["yAxis"]["name"] = f'Detectorsignaal ({data["y_unit"]})'
+            chart.options["yAxis"]["name"] = f'Signaal ({data["y_unit"]})' if data["y_unit"] else "Signaal"
             chart.update()
 
         update_live()

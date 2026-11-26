@@ -21,7 +21,16 @@ class i2c_msg:
 
 
 class SMBus:
-    def __init__(self, bus_number):
+    def __init__(self, bus_number=None):
+        pass
+
+    def open(self, bus_number):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
         pass
 
     def i2c_rdwr(self, msg):
@@ -38,8 +47,9 @@ class SMBus:
 # --------------------------------------------------
 
 class FakeBlock:
-    def __init__(self, detector):
+    def __init__(self, detector, analog):
         self.detector = detector
+        self.analog = analog
 
 
 class PDA36AU:
@@ -52,14 +62,14 @@ class PDA36AU:
     def get_gain_db(self):
         return 20
 
-    def start_continuous(self):
+    def start_continuous(self, *, free_run=False):
         pass
 
     def stop_continuous(self):
         pass
 
-    def read_block(self):
-        global dac_value
+    def read_block(self, timeout=5.0, *, latest=False):
+        value = dac_value
 
         # Simpele cavity-resonantie
         midden = 2000
@@ -67,7 +77,7 @@ class PDA36AU:
 
         # Lorentz-profiel
         signaal = 1 / (
-            1 + ((dac_value - midden) / breedte) ** 2
+            1 + ((value - midden) / breedte) ** 2
         )
 
         # 2500 meetpunten, zoals de echte PDA ongeveer gebruikt
@@ -77,4 +87,5 @@ class PDA36AU:
             2500
         )
 
-        return FakeBlock(detector)
+        analog = np.full_like(detector, 3.3 * value / 4095)
+        return FakeBlock(detector, analog)

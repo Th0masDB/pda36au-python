@@ -105,7 +105,7 @@ Zonder aangesloten hardware:
 python gui/main.py --sim
 ```
 
-Met een echte PDA en DAC:
+Met een echte PDA. Sluit voor scans ook de DAC aan.
 
 ```bash
 python gui/main.py
@@ -138,13 +138,19 @@ na afloop, bij stoppen en bij een fout terug op nul te zetten.
 ### Live PDA-signaal
 
 Open **Grafieken** en klik op **Start live meting**. De grafiek toont het
-nieuwste PDA-meetblok en ververst maximaal vijf keer per seconde. De assen gebruiken
-de eenheden van de PDA.
+nieuwste PDA-meetblok en ververst maximaal vijf keer per seconde. Kanaal 1
+toont het detectorsignaal. Kanaal 2 toont de aangesloten DAC-uitgang op dezelfde
+tijdas, ook tijdens een scan. De achtergrondmeting gebruikt kanaal 1.
 Dit is het signaal binnen één meetblok, geen doorlopende geschiedenis.
 
 De meting blijft actief bij navigeren. Klik op **Stop live meting** voordat
 je een scan start. Tijdens scans toont deze pagina automatisch de PDA-blokken
-die de scan uitleest. De losse live meting wijzigt de DAC niet.
+die de scan uitleest. De losse live meting wacht niet op een triggerflank en
+herstelt de oorspronkelijke flank bij het stoppen.
+
+Zolang er geen scan loopt, kun je de DAC handmatig instellen. Vul een gehele
+waarde van **0–4095** in en klik op **Stel DAC in**. Als de DAC niet bereikbaar
+is, verschijnt er een melding bij de knop en gaat de PDA-meting door.
 
 ### Automatisch starten als systemd-service
 

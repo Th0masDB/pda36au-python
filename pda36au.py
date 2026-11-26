@@ -142,6 +142,7 @@ class PDA36AU:
     EP_DATA_IN = 0x83
 
     ADC_MIDSCALE = 32768
+    TRIGGER_SLOPE_NONE = 2
 
     DEFAULT_COMMAND_TIMEOUT_MS = 1000
     DEFAULT_DATA_TIMEOUT_MS = 1000
@@ -271,6 +272,7 @@ class PDA36AU:
 
         self._buffer_length: int | None = None
         self._expected_block_bytes: int | None = None
+        self._free_run_settings: tuple[int, int | None] | None = None
 
         self._scale_cache: PDAScale | None = None
 
@@ -315,7 +317,8 @@ class PDA36AU:
 
     def close(self) -> None:
         with self._stream_lock:
-            if self._stream_thread is not None or self._status_thread is not None:
+            if (self._stream_thread is not None or self._status_thread is not None
+                    or self._free_run_settings is not None):
                 with suppress(Exception):
                     self.stop_continuous()
 
@@ -1165,7 +1168,7 @@ class PDA36AU:
 
     def _status_poller(
         self,
-        interval: float = 0.05,
+        interval: float,
     ) -> None:
         """
         Periodic status traffic is intentionally kept running while
@@ -1215,16 +1218,22 @@ class PDA36AU:
             for thread in (self._stream_thread, self._status_thread)
         )
 
-    def start_continuous(self, buffer_length: int = 2500) -> None:
+    def start_continuous(self, buffer_length: int = 2500, *, free_run: bool = False) -> None:
+        """Start continuous acquisition, optionally without waiting for a trigger edge."""
         with self._stream_lock:
             if not self._claimed:
                 raise RuntimeError("De PDA36AU-verbinding is gesloten")
-            if self._stream_workers_alive():
+            if self._stream_workers_alive() or self._free_run_settings is not None:
                 raise RuntimeError("Continuous acquisitie draait al")
 
-            self._start_continuous(buffer_length, refresh_scale=True)
+            try:
+                self._start_continuous(buffer_length, refresh_scale=True, free_run=free_run)
+            except BaseException:
+                with suppress(Exception):
+                    self.stop_continuous()
+                raise
 
-    def _start_continuous(self, buffer_length: int, *, refresh_scale: bool) -> None:
+    def _start_continuous(self, buffer_length: int, *, refresh_scale: bool, free_run: bool) -> None:
         self._stream_error = None
         self._last_adc_status = None
 
@@ -1237,6 +1246,17 @@ class PDA36AU:
         # Proven start sequence.
         self.abort()
         self.abort()
+
+        if free_run:
+            slope = self.get_trigger_slope()
+            original_length = self.get_adc_buffer_length()
+            if not 1 <= original_length <= 0xFFFF:
+                raise RuntimeError(f"Ongeldige oorspronkelijke PDA-bufferlengte: {original_length}")
+            self._free_run_settings = (slope, original_length if original_length != buffer_length else None)
+            if slope != self.TRIGGER_SLOPE_NONE:
+                self.set_trigger_slope(self.TRIGGER_SLOPE_NONE)
+                if self.get_trigger_slope() != self.TRIGGER_SLOPE_NONE:
+                    raise RuntimeError("De PDA36AU accepteert geen acquisitie zonder triggerflank")
 
         self.set_continuous(1)
 
@@ -1278,26 +1298,23 @@ class PDA36AU:
             )
         )
 
-        try:
-            self._stream_thread.start()
-            if not self._stream_armed.wait(timeout=1.0):
-                raise RuntimeError("De PDA36AU-datareader kon niet starten")
+        self._stream_thread.start()
+        if not self._stream_armed.wait(timeout=1.0):
+            raise RuntimeError("De PDA36AU-datareader kon niet starten")
 
-            # The reader is now already waiting on endpoint 0x83.
-            self._stream_started.set()
-            self.start_adc()
-            self._last_adc_status = self.get_adc_status()
+        # The reader is now already waiting on endpoint 0x83.
+        self._stream_started.set()
+        self.start_adc()
+        self._last_adc_status = self.get_adc_status()
 
-            self._status_thread = threading.Thread(
-                target=self._status_poller,
-                name="PDA36AU-status-poller",
-                daemon=True,
-            )
-            self._status_thread.start()
-        except BaseException:
-            with suppress(Exception):
-                self.stop_continuous()
-            raise
+        # Free-running acquisition needs status requests at a higher cadence.
+        self._status_thread = threading.Thread(
+            target=self._status_poller,
+            args=(0.001 if free_run else 0.05,),
+            name="PDA36AU-status-poller",
+            daemon=True,
+        )
+        self._status_thread.start()
 
     def stop_continuous(self) -> None:
         with self._stream_lock:
@@ -1325,6 +1342,16 @@ class PDA36AU:
 
             if self._stream_thread is not None:
                 raise RuntimeError("De PDA36AU-datareader kon niet stoppen")
+
+            if self._free_run_settings is not None:
+                slope, length = self._free_run_settings
+                try:
+                    if length is not None:
+                        self.set_adc_buffer_length(length)
+                finally:
+                    if slope != self.TRIGGER_SLOPE_NONE:
+                        self.set_trigger_slope(slope)
+                self._free_run_settings = None
 
     def read_raw_block(
         self,
@@ -1366,8 +1393,9 @@ class PDA36AU:
         timeout: float = 5.0,
         *,
         recover_on_timeout: bool = True,
+        latest: bool = False,
     ) -> PDABlock:
-        """Wait up to `timeout` seconds per read. Restart a stalled stream once by default."""
+        """Read a block, restarting a stalled stream once by default. Use latest for display."""
         reader = self._stream_thread
         try:
             raw = self.read_raw_block(timeout=timeout)
@@ -1381,11 +1409,14 @@ class PDA36AU:
 
                 buffer_length = self._buffer_length
                 assert buffer_length is not None
+                free_run = self._free_run_settings is not None
                 logger.warning("PDA36AU-acquisitie opnieuw starten na time-out. %s", exc)
                 try:
                     self.stop_continuous()
-                    self._start_continuous(buffer_length, refresh_scale=False)
+                    self._start_continuous(buffer_length, refresh_scale=False, free_run=free_run)
                 except (RuntimeError, usb.core.USBError) as restart_error:
+                    with suppress(Exception):
+                        self.stop_continuous()
                     raise RuntimeError(f"{exc} PDA36AU-herstart mislukt: {restart_error}") from restart_error
 
             try:
@@ -1395,7 +1426,16 @@ class PDA36AU:
                     f"{retry_error}. De PDA36AU-acquisitie is eenmaal opnieuw gestart."
                 ) from retry_error
 
-        return self.decode_block(raw)
+        return self.decode_block(self._latest_raw_block(raw) if latest else raw)
+
+    def _latest_raw_block(self, raw: bytes) -> bytes:
+        # Limit the drain to the backlog already queued by the USB reader.
+        for _ in range(self._block_queue.qsize()):
+            try:
+                raw = self._block_queue.get_nowait()
+            except queue.Empty:
+                break
+        return raw
 
     def read_latest_block(
         self,
@@ -1430,18 +1470,7 @@ class PDA36AU:
         except queue.Empty:
             return None
 
-        # Drop older display blocks and keep the newest.
-        while True:
-            try:
-                raw = (
-                    self._block_queue.get_nowait()
-                )
-            except queue.Empty:
-                break
-
-        return self.decode_block(
-            raw
-        )
+        return self.decode_block(self._latest_raw_block(raw))
 
     def single_scan(
         self,
